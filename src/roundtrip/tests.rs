@@ -58,18 +58,18 @@ fn test_roundtrip(original: &str, expected: &str) -> bool {
     if event_list
         .iter()
         .cloned()
-        .into_inline_groups()
-        .eq(event_list_2.iter().cloned().into_inline_groups())
+        .into_inline_groups_nonconservative()
+        .eq(event_list_2.iter().cloned().into_inline_groups_nonconservative())
     {
         return true;
     }
-    let event_count = event_list.iter().cloned().into_inline_groups().count();
-    let event_count_2 = event_list_2.iter().cloned().into_inline_groups().count();
+    let event_count = event_list.iter().cloned().into_inline_groups_nonconservative().count();
+    let event_count_2 = event_list_2.iter().cloned().into_inline_groups_nonconservative().count();
     let same_event_count = event_list
         .iter()
         .cloned()
-        .into_inline_groups()
-        .zip(event_list_2.iter().cloned().into_inline_groups())
+        .into_inline_groups_nonconservative()
+        .zip(event_list_2.iter().cloned().into_inline_groups_nonconservative())
         .take_while(|(e1, e2)| e1 == e2)
         .count();
     if event_count == same_event_count && event_count_2 == same_event_count {
@@ -82,12 +82,12 @@ fn test_roundtrip(original: &str, expected: &str) -> bool {
         event_list
             .iter()
             .cloned()
-            .into_inline_groups()
+            .into_inline_groups_nonconservative()
             .nth(same_event_count),
         event_list_2
             .iter()
             .cloned()
-            .into_inline_groups()
+            .into_inline_groups_nonconservative()
             .nth(same_event_count),
     );
     eprintln!("Original input: \n{}", original);

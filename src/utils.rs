@@ -1,18 +1,23 @@
 use pulldown_cmark::{Event, Tag};
 
-pub(crate) fn normalize_inlines(inlines: &mut Vec<Event<'_>>) {
+pub(crate) fn normalize_inlines(inlines: &mut Vec<Event<'_>>, conservative: bool) {
     let mut idx = 0;
     while let Some(first_item) = inlines.get(idx) {
         if let Event::Text(first_text) = first_item {
-            let mut idx_end = idx + 1;
-            let mut replace_text = None;
-            while let Some(Event::Text(t)) = inlines.get(idx_end) {
-                replace_text.get_or_insert_with(|| first_text.to_string());
-                replace_text.as_mut().unwrap().extend(t.chars());
-                idx_end += 1;
-            }
-            if let Some(replace_text) = replace_text {
-                inlines.splice(idx..idx_end, Some(Event::Text(replace_text.into())));
+            if !conservative || !first_text.ends_with('\n') {
+                let mut idx_end = idx + 1;
+                let mut replace_text = None;
+                while let Some(Event::Text(t)) = inlines.get(idx_end) {
+                    if conservative && t.ends_with('\n') {
+                        break;
+                    }
+                    replace_text.get_or_insert_with(|| first_text.to_string());
+                    replace_text.as_mut().unwrap().extend(t.chars());
+                    idx_end += 1;
+                }
+                if let Some(replace_text) = replace_text {
+                    inlines.splice(idx..idx_end, Some(Event::Text(replace_text.into())));
+                }
             }
         }
         idx += 1;

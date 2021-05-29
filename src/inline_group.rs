@@ -13,6 +13,7 @@ where
     Iter: Iterator<Item = pulldown_cmark::Event<'event>>,
 {
     inner_iter: core::iter::Peekable<Iter>,
+    conservative: bool,
     allow_unpaired_block_events: bool,
     noninline_event_stack: Vec<pulldown_cmark::Tag<'event>>,
 }
@@ -54,7 +55,7 @@ where
                 }
                 inlines.extend(self.inner_iter.next());
             }
-            normalize_inlines(&mut inlines);
+            normalize_inlines(&mut inlines, self.conservative);
             Some(InlineGroupEvent::InlineGroup(inlines))
         }
     }
@@ -74,10 +75,14 @@ where
     pub fn new(parser: Iter) -> Self {
         let events = InlineGroupEvents {
             inner_iter: parser.peekable(),
+            conservative: true,
             allow_unpaired_block_events: false,
             noninline_event_stack: Default::default(),
         };
         InlineGroupIter { events }
+    }
+    pub fn set_conservative(&mut self, conservative: bool) {
+        self.events.conservative = conservative;
     }
 }
 
@@ -95,6 +100,9 @@ pub(crate) trait InlineGroupIteratorExt<'event>: Iterator<Item = pulldown_cmark:
     fn into_inline_groups(self) -> InlineGroupIter<'event, Self>
     where
         Self: Sized;
+    fn into_inline_groups_nonconservative(self) -> InlineGroupIter<'event, Self>
+    where
+        Self: Sized;
 }
 
 impl<'event, T> InlineGroupIteratorExt<'event> for T
@@ -103,5 +111,10 @@ where
 {
     fn into_inline_groups(self) -> InlineGroupIter<'event, Self> {
         InlineGroupIter::new(self)
+    }
+    fn into_inline_groups_nonconservative(self) -> InlineGroupIter<'event, Self> {
+        let mut iter = InlineGroupIter::new(self);
+        iter.set_conservative(false);
+        iter
     }
 }
