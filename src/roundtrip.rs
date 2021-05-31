@@ -1121,11 +1121,56 @@ fn process_inlines_group<'event>(
     context: &[AnnotatedBlockTag<'event>],
     inlines: &Vec<AnnotatedNestedInlineEvent<'event>>,
 ) -> io::Result<()> {
-    //resolve_emphasis_and_strong(inlines);
-    //Self::process_definition_and_references(writer, context, sequence, &resolution)?;
+    output_hoisted_references(writer, &[context], &inlines[..])?;
     output_inline_contents(writer, &[context], &inlines[..])?;
-    // eprintln!("FIXME: Output inlines");
 
+    Ok(())
+}
+
+fn output_hoisted_references<'event>(
+    writer: &mut dyn StrWrite,
+    context: &[&[AnnotatedBlockTag<'event>]],
+    inlines: &[AnnotatedNestedInlineEvent<'event>],
+) -> io::Result<()> {
+    use pulldown_cmark::LinkType;
+    for inline in inlines {
+        match inline {
+            AnnotatedNestedInlineEvent::Event(e) => {
+                // do nothing
+            },
+            AnnotatedNestedInlineEvent::Group(t, inlines) => {
+                match t {
+                    AnnotatedInlineTag::Emphasis => output_hoisted_references(writer, context, inlines)?,
+                    AnnotatedInlineTag::Strong => output_hoisted_references(writer, context, inlines)?,
+                    AnnotatedInlineTag::Link {kind, uri, title, ref_name} |
+                    AnnotatedInlineTag::Image {kind, uri, title, ref_name}=> {
+                        match kind {
+                            LinkType::Collapsed | LinkType::Shortcut | LinkType::Reference => {
+                                writer.write_str("[")?;
+                                if *kind == LinkType::Reference {
+                                    writer.write_str(&ref_name)?;
+                                } else {
+                                    output_inline_contents(writer, context, &inlines[..])?;
+                                }
+                                writer.write_str("]: ")?;
+                                writer.write_str(&*escape_url(uri))?;
+                                if !title.is_empty() {
+                                    writer.write_str(" \"")?;
+                                    writer.write_str(&*escape_text(&title))?;
+                                    writer.write_str("\"")?;
+                                }
+                                writer.write_str("\n")?;
+                                renew_nonnesting_sequence_line_start(writer, context)?;
+                                output_hoisted_references(writer, context, inlines)?;
+                            },
+                            _ => output_hoisted_references(writer, context, inlines)?,
+                        }
+                    }
+                    AnnotatedInlineTag::Other(_) => output_hoisted_references(writer, context, inlines)?,
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1168,10 +1213,28 @@ fn output_inline_contents<'event>(
                     writer.write_str("\\\n")?;
                     renew_nonnesting_sequence_line_start(writer, context)?;
                 }
-                Event::Code(s) => {
-                    writer.write_str("`")?;
-                    writer.write_str(s)?;
-                    writer.write_str("`")?;
+                Event::Code(str) => {
+                    let mut delim_str = String::new();
+                    loop {
+                        delim_str += "`";
+                        if str.find(&delim_str).is_none() {
+                            break;
+                        }
+                    }
+                    let need_space_delim = (str.starts_with(' ')
+                        || str.starts_with('`')
+                        || str.ends_with(' ')
+                        || str.ends_with('`'))
+                        && str.chars().any(|ch| !ch.is_whitespace());
+                    writer.write_str(&delim_str)?;
+                    if need_space_delim {
+                        writer.write_str(" ")?;
+                    }
+                    writer.write_str(str)?;
+                    if need_space_delim {
+                        writer.write_str(" ")?;
+                    }
+                    writer.write_str(&delim_str)?;
                 }
                 _ => {
                     eprintln!("unsupported inline: {:?}", e);
@@ -1198,7 +1261,16 @@ fn output_inline_contents<'event>(
                     match kind {
                         LinkType::Autolink | LinkType::Email => {
                             writer.write_str("<")?;
-                            output_inline_contents(writer, context, &inlines)?;
+                            for inline in inlines {
+                                match inline {
+                                    AnnotatedNestedInlineEvent::Event(Event::Text(s)) => {
+                                        writer.write_str(s)?;
+                                    }
+                                    _ => {
+                                        unreachable!();
+                                    }
+                                }
+                            }
                             writer.write_str(">")?;
                         }
                         LinkType::Collapsed => {
