@@ -1,5 +1,15 @@
 use pulldown_cmark::{Event, Tag};
 
+mod inline_group;
+mod nested_inline_group;
+mod vec_map;
+mod vec_set;
+
+pub(crate) use inline_group::{InlineGroupIteratorExt, InlineGroupEvent};
+pub(crate) use nested_inline_group::{NestedInlineGroupIteratorExt, NestedInlineGroupEvent};
+pub(crate) use vec_map::VecMap;
+pub(crate) use vec_set::VecSet;
+
 pub(crate) fn normalize_inlines(inlines: &mut Vec<Event<'_>>, conservative: bool) {
     let mut idx = 0;
     while let Some(first_item) = inlines.get(idx) {
@@ -62,94 +72,3 @@ pub(crate) fn is_block_event<'event>(event: &pulldown_cmark::Event<'event>) -> b
     }
 }
 
-pub(crate) struct VecMap<K, V>(Vec<(K, V)>);
-
-impl<K: PartialEq, V> VecMap<K, V> {
-    pub(crate) fn get(&self, k: &K) -> Option<&V> {
-        for (existing_k, existing_v) in self.0.iter() {
-            if existing_k == k {
-                return Some(existing_v);
-            }
-        }
-        None
-    }
-
-    pub(crate) fn get_mut(&mut self, k: &K) -> Option<&mut V> {
-        for (existing_k, existing_v) in self.0.iter_mut() {
-            if existing_k == k {
-                return Some(existing_v);
-            }
-        }
-        None
-    }
-
-    pub(crate) fn contains(&self, k: &K) -> bool {
-        self.get(k).is_some()
-    }
-    pub(crate) fn insert(&mut self, k: K, v: V) {
-        if let Some(existing_v) = self.get_mut(&k) {
-            *existing_v = v;
-        } else {
-            self.0.push((k, v));
-        }
-    }
-}
-
-impl<K, V> IntoIterator for VecMap<K, V> {
-    type Item = (K, V);
-    type IntoIter = std::vec::IntoIter<(K, V)>;
-    fn into_iter(self) -> std::vec::IntoIter<(K, V)> {
-        self.0.into_iter()
-    }
-}
-
-impl<K: PartialEq, V> std::iter::FromIterator<(K, V)> for VecMap<K, V> {
-    fn from_iter<I: IntoIterator<Item = (K, V)>>(iter: I) -> Self {
-        let mut result = VecMap::default();
-        for (k, v) in iter {
-            result.insert(k, v);
-        }
-        result
-    }
-}
-
-impl<K, V> Default for VecMap<K, V> {
-    fn default() -> Self {
-        VecMap(Default::default())
-    }
-}
-
-pub(crate) struct VecSet<T>(VecMap<T, ()>);
-
-impl<T> Default for VecSet<T> {
-    fn default() -> Self {
-        VecSet(Default::default())
-    }
-}
-
-impl<T> IntoIterator for VecSet<T> {
-    type Item = T;
-    type IntoIter = VecSetIntoIter<T>;
-    fn into_iter(self) -> VecSetIntoIter<T> {
-        VecSetIntoIter {
-            inner: self.0.into_iter(),
-        }
-    }
-}
-
-impl<T: PartialEq> std::iter::FromIterator<T> for VecSet<T> {
-    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
-        VecSet(VecMap::from_iter(iter.into_iter().map(|x| (x, ()))))
-    }
-}
-
-pub(crate) struct VecSetIntoIter<T> {
-    inner: std::vec::IntoIter<(T, ())>,
-}
-
-impl<T> Iterator for VecSetIntoIter<T> {
-    type Item = T;
-    fn next(&mut self) -> Option<T> {
-        self.inner.next().map(|x| x.0)
-    }
-}

@@ -2,7 +2,7 @@ use std::iter::Peekable;
 
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Tag};
 
-use crate::inline_group::{InlineGroupEvent, InlineGroupIteratorExt};
+use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
 use crate::utils::VecMap;
 
 fn erase_cowstr_lifetime(c: &CowStr<'_>) -> CowStr<'static> {

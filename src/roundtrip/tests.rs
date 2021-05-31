@@ -1,5 +1,5 @@
 use super::write_markdown;
-use crate::inline_group::{InlineGroupIteratorExt};
+use crate::utils::InlineGroupIteratorExt;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 
 const COMMONMARK_SPEC_TEXT: &'static str = include_str!("./third_party/CommonMark/spec.txt");

@@ -1,4 +1,4 @@
-use crate::inline_group::{InlineGroupEvent, InlineGroupIteratorExt};
+use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
 use crate::roundtrip::write_markdown;
 use crate::utils::VecSet;
 use pulldown_cmark::{Event, Tag};

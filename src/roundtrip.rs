@@ -1,6 +1,6 @@
-use crate::inline_group::{InlineGroupEvent, InlineGroupIteratorExt};
+use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
+use crate::utils::{NestedInlineGroupEvent, NestedInlineGroupIteratorExt};
 use pulldown_cmark::escape::{StrWrite, WriteWrapper};
-use pulldown_cmark::{Event, Tag};
 use std::io::{self, Write};
 use std::mem;
 use std::rc::Rc;
@@ -11,7 +11,7 @@ use std::{cell::Cell, collections::VecDeque};
 #[allow(unused)]
 pub(crate) fn push_markdown<'a, I>(s: &mut String, iter: I)
 where
-    I: Iterator<Item = Event<'a>>,
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
 {
     MarkdownWriter::new(iter, s).run().unwrap();
 }
@@ -25,7 +25,7 @@ where
 /// prevent unnecessary slowdowns.
 pub(crate) fn write_markdown<'a, I, W>(writer: W, iter: I) -> io::Result<()>
 where
-    I: Iterator<Item = Event<'a>>,
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
     W: Write,
 {
     MarkdownWriter::new(iter, WriteWrapper(writer)).run()
@@ -43,7 +43,7 @@ struct MarkdownWriter<'a, I, W> {
 
 impl<'a, I, W> MarkdownWriter<'a, I, W>
 where
-    I: Iterator<Item = Event<'a>>,
+    I: Iterator<Item = pulldown_cmark::Event<'a>>,
     W: StrWrite,
 {
     fn new(iter: I, writer: W) -> Self {
@@ -73,7 +73,7 @@ where
                         }
                         if !context
                             .get(context_len - desc_counter - 1)
-                            .map(|t: &AnnotatedTag<'_>| t.match_pair(tag))
+                            .map(|t: &AnnotatedBlockTag<'_>| t.match_pair(tag))
                             .unwrap_or(false)
                         {
                             continue;
@@ -108,7 +108,14 @@ where
                     remaining_groups = tail;
                 }
                 [InlineOrBlockTraverseGroup::InlineGroup(inlines), tail @ ..] => {
-                    process_inlines_group(&mut self.writer, &context, inlines)?;
+                    let mut inline_group_ctx = InlineGroupCtx::new();
+                    let nested_inline_groups = inlines
+                        .iter()
+                        .cloned()
+                        .into_nested_inline_groups()
+                        .map(|group| annotate_inline_group(&mut inline_group_ctx, group))
+                        .collect::<Vec<_>>();
+                    process_inlines_group(&mut self.writer, &context, &nested_inline_groups)?;
                     remaining_groups = tail;
                 }
                 [InlineOrBlockTraverseGroup::EarlyStop, ..] => {
@@ -152,7 +159,7 @@ enum HeadingStyle {
 }
 
 #[derive(Clone, Debug)]
-enum AnnotatedTag<'event> {
+enum AnnotatedBlockTag<'event> {
     Root {
         next_descendent_list_style_kind: Rc<Cell<ListStyleKind>>,
     },
@@ -168,16 +175,16 @@ enum AnnotatedTag<'event> {
         level: u32,
         self_style: Rc<Cell<HeadingStyle>>,
     },
-    Other(Tag<'event>),
+    Other(pulldown_cmark::Tag<'event>),
 }
 
-impl<'event> AnnotatedTag<'event> {
+impl<'event> AnnotatedBlockTag<'event> {
     fn match_pair(&self, rhs: &Self) -> bool {
         match (self, rhs) {
-            (AnnotatedTag::Root { .. }, AnnotatedTag::Root { .. }) => true,
+            (AnnotatedBlockTag::Root { .. }, AnnotatedBlockTag::Root { .. }) => true,
             (
-                AnnotatedTag::List { self_style, .. },
-                AnnotatedTag::List {
+                AnnotatedBlockTag::List { self_style, .. },
+                AnnotatedBlockTag::List {
                     self_style: rhs_style,
                     ..
                 },
@@ -186,13 +193,13 @@ impl<'event> AnnotatedTag<'event> {
                 (ListStyle::Unordered(..), ListStyle::Unordered(..)) => true,
                 _ => false,
             },
-            (AnnotatedTag::Item { .. }, AnnotatedTag::Item { .. }) => true,
-            (AnnotatedTag::ThinPara { .. }, AnnotatedTag::ThinPara { .. }) => true,
+            (AnnotatedBlockTag::Item { .. }, AnnotatedBlockTag::Item { .. }) => true,
+            (AnnotatedBlockTag::ThinPara { .. }, AnnotatedBlockTag::ThinPara { .. }) => true,
             (
-                AnnotatedTag::Heading { level: level1, .. },
-                AnnotatedTag::Heading { level: level2, .. },
+                AnnotatedBlockTag::Heading { level: level1, .. },
+                AnnotatedBlockTag::Heading { level: level2, .. },
             ) => *level1 == *level2,
-            (AnnotatedTag::Other(self_tag), AnnotatedTag::Other(other_tag)) => {
+            (AnnotatedBlockTag::Other(self_tag), AnnotatedBlockTag::Other(other_tag)) => {
                 self_tag == other_tag
             }
             _ => false,
@@ -200,42 +207,44 @@ impl<'event> AnnotatedTag<'event> {
     }
 }
 
-impl<'event> From<Tag<'event>> for AnnotatedTag<'event> {
-    fn from(v: Tag<'event>) -> Self {
+impl<'event> From<pulldown_cmark::Tag<'event>> for AnnotatedBlockTag<'event> {
+    fn from(v: pulldown_cmark::Tag<'event>) -> Self {
+        use pulldown_cmark::Tag;
         match v {
             Tag::List(style) => {
                 let liststyle = match style {
                     None => ListStyle::Unordered(ListStyleKind::Style1),
                     Some(ordinal) => ListStyle::Ordered(ListStyleKind::Style1, ordinal),
                 };
-                AnnotatedTag::List {
+                AnnotatedBlockTag::List {
                     self_style: Rc::new(Cell::new(liststyle)),
                     next_descendent_list_style_kind: Rc::new(Cell::new(ListStyleKind::Style1)),
                 }
             }
-            Tag::Item => AnnotatedTag::Item {
+            Tag::Item => AnnotatedBlockTag::Item {
                 is_thin: Cell::new(false),
             },
-            Tag::Heading(level) => AnnotatedTag::Heading {
+            Tag::Heading(level) => AnnotatedBlockTag::Heading {
                 level,
                 self_style: Rc::new(Cell::new(HeadingStyle::ATX)),
             },
-            _ => AnnotatedTag::Other(v),
+            _ => AnnotatedBlockTag::Other(v),
         }
     }
 }
 
 enum InlineOrBlockTraverseGroup<'event> {
-    Ascending(Vec<AnnotatedTag<'event>>),
-    Descending(Vec<AnnotatedTag<'event>>),
-    BlockSingleton(Event<'event>),
-    InlineGroup(Vec<Event<'event>>),
+    Ascending(Vec<AnnotatedBlockTag<'event>>),
+    Descending(Vec<AnnotatedBlockTag<'event>>),
+    BlockSingleton(pulldown_cmark::Event<'event>),
+    InlineGroup(Vec<pulldown_cmark::Event<'event>>),
     EarlyStop,
 }
 
 fn split_events_into_traverse_groups<'event>(
     events: impl Iterator<Item = InlineGroupEvent<'event>>,
 ) -> Vec<InlineOrBlockTraverseGroup<'event>> {
+    use pulldown_cmark::Event;
     let mut events = events.peekable();
     let mut traverse_groups = vec![];
     while let Some(item) = events.next() {
@@ -271,35 +280,33 @@ fn split_events_into_traverse_groups<'event>(
     traverse_groups
 }
 
-fn is_early_stop_skippable<'event>(tag: &AnnotatedTag<'event>) -> bool {
+fn is_early_stop_skippable<'event>(tag: &AnnotatedBlockTag<'event>) -> bool {
+    use pulldown_cmark::Tag;
     match tag {
-        AnnotatedTag::Root {..} => true,
-        AnnotatedTag::Heading { self_style, ..} => {
-            self_style.get() != HeadingStyle::ATX
-        }
-        AnnotatedTag::List {..} => true,
-        AnnotatedTag::ThinPara => true,
-        AnnotatedTag::Item {..} => true,
-        AnnotatedTag::Other(tag) => {
-            match tag {
-                Tag::Paragraph => true,
-                Tag::CodeBlock(kind) => {
-                    use pulldown_cmark::CodeBlockKind;
-                    match kind {
-                        CodeBlockKind::Indented => true,
-                        CodeBlockKind::Fenced(_) => false,
-                    }
+        AnnotatedBlockTag::Root { .. } => true,
+        AnnotatedBlockTag::Heading { self_style, .. } => self_style.get() != HeadingStyle::ATX,
+        AnnotatedBlockTag::List { .. } => true,
+        AnnotatedBlockTag::ThinPara => true,
+        AnnotatedBlockTag::Item { .. } => true,
+        AnnotatedBlockTag::Other(tag) => match tag {
+            Tag::Paragraph => true,
+            Tag::CodeBlock(kind) => {
+                use pulldown_cmark::CodeBlockKind;
+                match kind {
+                    CodeBlockKind::Indented => true,
+                    CodeBlockKind::Fenced(_) => false,
                 }
-                _ => false,
             }
-        }
+            _ => false,
+        },
     }
 }
 
 fn normalize_traverse_groups<'event>(
     traverse_groups: &mut Vec<InlineOrBlockTraverseGroup<'event>>,
 ) {
-    let root = AnnotatedTag::Root {
+    use pulldown_cmark::{Event, Tag};
+    let root = AnnotatedBlockTag::Root {
         next_descendent_list_style_kind: Rc::new(Cell::new(ListStyleKind::Style1)),
     };
     // insert fictional "root" tag to the beginning and the end.
@@ -330,7 +337,7 @@ fn normalize_traverse_groups<'event>(
         if let [InlineOrBlockTraverseGroup::Ascending(asc), InlineOrBlockTraverseGroup::InlineGroup(group), InlineOrBlockTraverseGroup::Descending(_desc), ..] =
             &mut traverse_groups[idx..]
         {
-            if let [.., AnnotatedTag::Other(Tag::CodeBlock(_))] = &asc[..] {
+            if let [.., AnnotatedBlockTag::Other(Tag::CodeBlock(_))] = &asc[..] {
                 if let [.., Event::Text(s)] = &mut group[..] {
                     if s.ends_with('\n') {
                         let mut str = s.to_string();
@@ -338,7 +345,7 @@ fn normalize_traverse_groups<'event>(
                         *s = str.into();
                     }
                 }
-            } else if let [.., AnnotatedTag::Heading{self_style, ..}] = &asc[..] {
+            } else if let [.., AnnotatedBlockTag::Heading { self_style, .. }] = &asc[..] {
                 if let [Event::Text(s)] = &mut group[..] {
                     if s.is_empty() {
                         self_style.set(HeadingStyle::ATXWithClosing);
@@ -394,7 +401,7 @@ fn normalize_traverse_groups<'event>(
                     if let Some(InlineOrBlockTraverseGroup::Ascending(asc)) =
                         traverse_groups.get(idx - 1)
                     {
-                        if let Some(AnnotatedTag::Item { .. }) = asc.last() {
+                        if let Some(AnnotatedBlockTag::Item { .. }) = asc.last() {
                             thin = true;
                         }
                     }
@@ -405,14 +412,14 @@ fn normalize_traverse_groups<'event>(
                         thin = true;
                     }
                     Some(InlineOrBlockTraverseGroup::Descending(desc)) => {
-                        if let Some(AnnotatedTag::Item { .. }) = desc.first() {
+                        if let Some(AnnotatedBlockTag::Item { .. }) = desc.first() {
                             thin = true;
                         }
                     }
                     _ => {}
                 }
                 if thin {
-                    let thin_para = AnnotatedTag::ThinPara;
+                    let thin_para = AnnotatedBlockTag::ThinPara;
                     let mut offset = 0;
                     if idx == 0 {
                         traverse_groups.insert(
@@ -472,10 +479,10 @@ fn mark_item_tag_as_thin<'event>(traverse_groups: &[InlineOrBlockTraverseGroup<'
                         }
                     }
                     match tag {
-                        AnnotatedTag::ThinPara => {
+                        AnnotatedBlockTag::ThinPara => {
                             continue;
                         }
-                        AnnotatedTag::Item { is_thin } => {
+                        AnnotatedBlockTag::Item { is_thin } => {
                             is_thin.set(true);
                             return;
                         }
@@ -490,19 +497,19 @@ fn mark_item_tag_as_thin<'event>(traverse_groups: &[InlineOrBlockTraverseGroup<'
 }
 
 fn find_active_list_style<'event>(
-    tags_in_effect: &[&[AnnotatedTag<'event>]],
+    tags_in_effect: &[&[AnnotatedBlockTag<'event>]],
 ) -> Option<Rc<Cell<ListStyle>>> {
     for tag_list in tags_in_effect.iter().rev() {
         for tag in tag_list.iter().rev() {
             match tag {
-                AnnotatedTag::List { self_style, .. } => {
+                AnnotatedBlockTag::List { self_style, .. } => {
                     return Some(self_style.clone());
                 }
-                AnnotatedTag::Root { .. }
-                | AnnotatedTag::Item { .. }
-                | AnnotatedTag::ThinPara
-                | AnnotatedTag::Heading { .. }
-                | AnnotatedTag::Other(_) => {}
+                AnnotatedBlockTag::Root { .. }
+                | AnnotatedBlockTag::Item { .. }
+                | AnnotatedBlockTag::ThinPara
+                | AnnotatedBlockTag::Heading { .. }
+                | AnnotatedBlockTag::Other(_) => {}
             }
         }
     }
@@ -510,26 +517,26 @@ fn find_active_list_style<'event>(
 }
 
 fn find_next_descendent_list_style_kind<'event>(
-    tags_in_effect: &[&[AnnotatedTag<'event>]],
+    tags_in_effect: &[&[AnnotatedBlockTag<'event>]],
 ) -> Option<Rc<Cell<ListStyleKind>>> {
     for tag_list in tags_in_effect.iter().rev() {
         for tag in tag_list.iter().rev() {
             match tag {
-                AnnotatedTag::Root {
+                AnnotatedBlockTag::Root {
                     next_descendent_list_style_kind,
                 } => {
                     return Some(next_descendent_list_style_kind.clone());
                 }
-                AnnotatedTag::List {
+                AnnotatedBlockTag::List {
                     next_descendent_list_style_kind,
                     ..
                 } => {
                     return Some(next_descendent_list_style_kind.clone());
                 }
-                AnnotatedTag::Item { .. }
-                | AnnotatedTag::ThinPara
-                | AnnotatedTag::Heading { .. }
-                | AnnotatedTag::Other(_) => {}
+                AnnotatedBlockTag::Item { .. }
+                | AnnotatedBlockTag::ThinPara
+                | AnnotatedBlockTag::Heading { .. }
+                | AnnotatedBlockTag::Other(_) => {}
             }
         }
     }
@@ -538,20 +545,21 @@ fn find_next_descendent_list_style_kind<'event>(
 
 fn renew_nonnesting_sequence_line_start<'event>(
     writer: &mut dyn StrWrite,
-    tags_in_effect: &[&[AnnotatedTag<'event>]],
+    tags_in_effect: &[&[AnnotatedBlockTag<'event>]],
 ) -> io::Result<()> {
     use pulldown_cmark::CodeBlockKind;
+    use pulldown_cmark::Tag;
 
     for (outer_idx, tag_list) in tags_in_effect.iter().enumerate() {
         for (idx, tag) in tag_list.iter().enumerate() {
             match tag {
-                AnnotatedTag::Root { .. } => {
+                AnnotatedBlockTag::Root { .. } => {
                     // do nothing
                 }
-                AnnotatedTag::List { .. } => {
+                AnnotatedBlockTag::List { .. } => {
                     // do nothing
                 }
-                AnnotatedTag::Item { .. } => {
+                AnnotatedBlockTag::Item { .. } => {
                     let mut context_segments = vec![];
                     context_segments.extend(&tags_in_effect[0..outer_idx]);
                     context_segments.push(&tags_in_effect[outer_idx][0..idx]);
@@ -575,27 +583,27 @@ fn renew_nonnesting_sequence_line_start<'event>(
                         );
                     }
                 }
-                AnnotatedTag::ThinPara => {
+                AnnotatedBlockTag::ThinPara => {
                     // do nothing
                 }
-                AnnotatedTag::Heading { .. } => {
+                AnnotatedBlockTag::Heading { .. } => {
                     // do nothing
                 }
-                AnnotatedTag::Other(Tag::List(_))
-                | AnnotatedTag::Other(Tag::Item)
-                | AnnotatedTag::Other(Tag::Heading(_)) => {
+                AnnotatedBlockTag::Other(Tag::List(_))
+                | AnnotatedBlockTag::Other(Tag::Item)
+                | AnnotatedBlockTag::Other(Tag::Heading(_)) => {
                     unreachable!()
                 }
-                AnnotatedTag::Other(Tag::Paragraph) => {
+                AnnotatedBlockTag::Other(Tag::Paragraph) => {
                     // do nothing
                 }
-                AnnotatedTag::Other(Tag::BlockQuote) => {
+                AnnotatedBlockTag::Other(Tag::BlockQuote) => {
                     writer.write_str("> ")?;
                 }
-                AnnotatedTag::Other(Tag::CodeBlock(CodeBlockKind::Indented)) => {
+                AnnotatedBlockTag::Other(Tag::CodeBlock(CodeBlockKind::Indented)) => {
                     writer.write_str("    ")?;
                 }
-                AnnotatedTag::Other(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+                AnnotatedBlockTag::Other(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
                     // do nothing
                 }
                 _ => {
@@ -609,17 +617,18 @@ fn renew_nonnesting_sequence_line_start<'event>(
 
 fn process_block_incoming<'event>(
     writer: &mut dyn StrWrite,
-    remaining: &[AnnotatedTag<'event>],
-    incoming: &[AnnotatedTag<'event>],
+    remaining: &[AnnotatedBlockTag<'event>],
+    incoming: &[AnnotatedBlockTag<'event>],
 ) -> io::Result<()> {
     use pulldown_cmark::CodeBlockKind;
+    use pulldown_cmark::Tag;
 
     for (idx, tag) in incoming.iter().enumerate() {
         match tag {
-            AnnotatedTag::Root { .. } => {
+            AnnotatedBlockTag::Root { .. } => {
                 // do nothing
             }
-            AnnotatedTag::List { self_style, .. } => {
+            AnnotatedBlockTag::List { self_style, .. } => {
                 let active_list_style_kind =
                     find_next_descendent_list_style_kind(&[remaining, &incoming[..idx + 0]]);
                 if let Some(active_list_style_kind) = active_list_style_kind {
@@ -640,7 +649,7 @@ fn process_block_incoming<'event>(
                 }
                 // the actual label will be written by AnnotatedTag::Item.
             }
-            AnnotatedTag::Item { .. } => {
+            AnnotatedBlockTag::Item { .. } => {
                 let list_style = find_active_list_style(&[remaining, &incoming[..idx + 0]]);
                 if let Some(list_style) = list_style {
                     let style = list_style.get();
@@ -669,34 +678,32 @@ fn process_block_incoming<'event>(
                     );
                 }
             }
-            AnnotatedTag::ThinPara => {
+            AnnotatedBlockTag::ThinPara => {
                 // do nothing
             }
-            AnnotatedTag::Heading { level, self_style } => {
-                match self_style.get() {
-                    HeadingStyle::ATX | HeadingStyle::ATXWithClosing => {
-                        let level_str = &"#######"[..(*level) as usize];
-                        writer.write_str(level_str)?;
-                        writer.write_str(" ")?;
-                    }
-                    _ => {},
+            AnnotatedBlockTag::Heading { level, self_style } => match self_style.get() {
+                HeadingStyle::ATX | HeadingStyle::ATXWithClosing => {
+                    let level_str = &"#######"[..(*level) as usize];
+                    writer.write_str(level_str)?;
+                    writer.write_str(" ")?;
                 }
-            }
-            AnnotatedTag::Other(Tag::List(_))
-            | AnnotatedTag::Other(Tag::Item)
-            | AnnotatedTag::Other(Tag::Heading(_)) => {
+                _ => {}
+            },
+            AnnotatedBlockTag::Other(Tag::List(_))
+            | AnnotatedBlockTag::Other(Tag::Item)
+            | AnnotatedBlockTag::Other(Tag::Heading(_)) => {
                 unreachable!()
             }
-            AnnotatedTag::Other(Tag::Paragraph) => {
+            AnnotatedBlockTag::Other(Tag::Paragraph) => {
                 // do nothing
             }
-            AnnotatedTag::Other(Tag::BlockQuote) => {
+            AnnotatedBlockTag::Other(Tag::BlockQuote) => {
                 writer.write_str("> ")?;
             }
-            AnnotatedTag::Other(Tag::CodeBlock(CodeBlockKind::Indented)) => {
+            AnnotatedBlockTag::Other(Tag::CodeBlock(CodeBlockKind::Indented)) => {
                 writer.write_str("    ")?;
             }
-            AnnotatedTag::Other(Tag::CodeBlock(CodeBlockKind::Fenced(str))) => {
+            AnnotatedBlockTag::Other(Tag::CodeBlock(CodeBlockKind::Fenced(str))) => {
                 writer.write_str("````")?;
                 writer.write_str(str)?;
                 writer.write_str("\n")?;
@@ -717,22 +724,23 @@ fn process_block_incoming<'event>(
 
 fn process_block_removal<'event>(
     writer: &mut dyn StrWrite,
-    remaining: &[AnnotatedTag<'event>],
-    removal: &[AnnotatedTag<'event>],
+    remaining: &[AnnotatedBlockTag<'event>],
+    removal: &[AnnotatedBlockTag<'event>],
 ) -> io::Result<()> {
     use pulldown_cmark::CodeBlockKind;
+    use pulldown_cmark::Tag;
 
     let mut need_newline = false;
 
     for (idx, tag) in removal.iter().enumerate().rev() {
         match tag {
-            AnnotatedTag::Root { .. } => {
+            AnnotatedBlockTag::Root { .. } => {
                 // do nothing
             }
-            AnnotatedTag::List { .. } => {
+            AnnotatedBlockTag::List { .. } => {
                 // do nothing
             }
-            AnnotatedTag::Item { .. } => {
+            AnnotatedBlockTag::Item { .. } => {
                 let list_style = find_active_list_style(&[remaining, &removal[..idx + 0]]);
                 if let Some(list_style) = list_style {
                     let style = list_style.get();
@@ -753,20 +761,23 @@ fn process_block_removal<'event>(
                 }
                 need_newline = true;
             }
-            AnnotatedTag::ThinPara => {
+            AnnotatedBlockTag::ThinPara => {
                 need_newline = true;
             }
-            AnnotatedTag::Heading { level, self_style } => {
+            AnnotatedBlockTag::Heading { level, self_style } => {
                 match self_style.get() {
-                    HeadingStyle::ATX => {},
+                    HeadingStyle::ATX => {}
                     HeadingStyle::ATXWithClosing => {
                         let level_str = &"#######"[..(*level) as usize];
                         writer.write_str(" ")?;
                         writer.write_str(level_str)?;
-                    },
+                    }
                     HeadingStyle::Setext => {
                         writer.write_str("\n")?;
-                        renew_nonnesting_sequence_line_start(writer, &[remaining, &removal[..idx]])?;
+                        renew_nonnesting_sequence_line_start(
+                            writer,
+                            &[remaining, &removal[..idx]],
+                        )?;
                         if *level == 1 {
                             writer.write_str("=========")?;
                         } else {
@@ -776,18 +787,19 @@ fn process_block_removal<'event>(
                 }
                 need_newline = true;
             }
-            AnnotatedTag::Other(Tag::Paragraph) | AnnotatedTag::Other(Tag::BlockQuote) => {
+            AnnotatedBlockTag::Other(Tag::Paragraph)
+            | AnnotatedBlockTag::Other(Tag::BlockQuote) => {
                 need_newline = true;
             }
-            AnnotatedTag::Other(Tag::List(_))
-            | AnnotatedTag::Other(Tag::Item)
-            | AnnotatedTag::Other(Tag::Heading(_)) => {
+            AnnotatedBlockTag::Other(Tag::List(_))
+            | AnnotatedBlockTag::Other(Tag::Item)
+            | AnnotatedBlockTag::Other(Tag::Heading(_)) => {
                 unreachable!()
             }
-            AnnotatedTag::Other(Tag::CodeBlock(CodeBlockKind::Indented)) => {
+            AnnotatedBlockTag::Other(Tag::CodeBlock(CodeBlockKind::Indented)) => {
                 need_newline = true;
             }
-            AnnotatedTag::Other(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
+            AnnotatedBlockTag::Other(Tag::CodeBlock(CodeBlockKind::Fenced(_))) => {
                 writer.write_str("\n")?;
                 renew_nonnesting_sequence_line_start(writer, &[remaining, &removal[..idx]])?;
                 //UNNECESSARY: need_newline = false;
@@ -812,11 +824,12 @@ fn process_block_removal<'event>(
 
 fn process_tag_transition<'event>(
     writer: &mut dyn StrWrite,
-    remaining: &[AnnotatedTag<'event>],
-    removal: &[AnnotatedTag<'event>],
-    incoming: &[AnnotatedTag<'event>],
+    remaining: &[AnnotatedBlockTag<'event>],
+    removal: &[AnnotatedBlockTag<'event>],
+    incoming: &[AnnotatedBlockTag<'event>],
 ) -> io::Result<()> {
     use pulldown_cmark::CodeBlockKind;
+    use pulldown_cmark::Tag;
     enum TransitionStrategy {
         DoNothing,
         FlipListStyle,
@@ -827,54 +840,85 @@ fn process_tag_transition<'event>(
         ([], []) => {
             strategy = Some(TransitionStrategy::DoNothing);
         }
-        ([AnnotatedTag::Other(Tag::Paragraph), ..], [AnnotatedTag::Other(Tag::Paragraph), ..])
-        | (
-            [AnnotatedTag::Other(Tag::Paragraph), ..],
-            [AnnotatedTag::Other(Tag::CodeBlock(CodeBlockKind::Indented)), ..],
+        (
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
         )
         | (
-            [AnnotatedTag::Other(Tag::BlockQuote), ..],
-            [AnnotatedTag::Other(Tag::BlockQuote), ..],
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
+            [AnnotatedBlockTag::Other(Tag::CodeBlock(CodeBlockKind::Indented)), ..],
         )
-        | ([AnnotatedTag::Other(Tag::BlockQuote), ..], [AnnotatedTag::Other(Tag::Paragraph), ..])
-        | ([AnnotatedTag::Other(Tag::Paragraph), ..], [AnnotatedTag::List { .. }, ..])
-        | ([AnnotatedTag::List { .. }, ..], [AnnotatedTag::Other(Tag::Paragraph), ..]) => {
+        | (
+            [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],
+            [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],
+        )
+        | (
+            [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
+        )
+        | ([AnnotatedBlockTag::Other(Tag::Paragraph), ..], [AnnotatedBlockTag::List { .. }, ..])
+        | ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::Other(Tag::Paragraph), ..]) => {
             strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
         }
-        ([AnnotatedTag::List { .. }, ..], [AnnotatedTag::List { .. }, ..]) => {
+        ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::List { .. }, ..]) => {
             strategy = Some(TransitionStrategy::FlipListStyle)
         }
-        ([AnnotatedTag::Other(Tag::Paragraph), ..], [AnnotatedTag::Heading { .. }, ..])
-        | (
-            [AnnotatedTag::Other(Tag::Paragraph), ..],
-            [AnnotatedTag::Other(Tag::CodeBlock(CodeBlockKind::Fenced(_))), ..],
+        (
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
+            [AnnotatedBlockTag::Heading { .. }, ..],
         )
-        | ([AnnotatedTag::Other(Tag::Paragraph), ..], [AnnotatedTag::Other(Tag::BlockQuote), ..])
-        | ([AnnotatedTag::Heading { .. }, ..], [AnnotatedTag::Other(Tag::Paragraph), ..])
-        | ([AnnotatedTag::Heading { .. }, ..], [AnnotatedTag::Heading { .. }, ..])
-        | ([AnnotatedTag::Heading { .. }, ..], [AnnotatedTag::Other(Tag::CodeBlock(_)), ..])
-        | ([AnnotatedTag::Heading { .. }, ..], [AnnotatedTag::Other(Tag::BlockQuote), ..])
         | (
-            [AnnotatedTag::Other(Tag::CodeBlock(_)), ..],
-            [AnnotatedTag::Other(Tag::Paragraph), ..],
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
+            [AnnotatedBlockTag::Other(Tag::CodeBlock(CodeBlockKind::Fenced(_))), ..],
         )
-        | ([AnnotatedTag::Other(Tag::CodeBlock(_)), ..], [AnnotatedTag::Heading { .. }, ..])
-        | ([AnnotatedTag::Other(Tag::CodeBlock(_)), ..], [AnnotatedTag::List { .. }, ..])
         | (
-            [AnnotatedTag::Other(Tag::CodeBlock(_)), ..],
-            [AnnotatedTag::Other(Tag::BlockQuote), ..],
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
+            [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],
         )
-        | ([AnnotatedTag::Other(Tag::BlockQuote), ..], [AnnotatedTag::Heading { .. }, ..])
         | (
-            [AnnotatedTag::Other(Tag::BlockQuote), ..],
-            [AnnotatedTag::Other(Tag::CodeBlock(_)), ..],
+            [AnnotatedBlockTag::Heading { .. }, ..],
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
         )
-        | ([AnnotatedTag::Other(Tag::BlockQuote), ..], [AnnotatedTag::List { .. }, ..]) => {
+        | ([AnnotatedBlockTag::Heading { .. }, ..], [AnnotatedBlockTag::Heading { .. }, ..])
+        | (
+            [AnnotatedBlockTag::Heading { .. }, ..],
+            [AnnotatedBlockTag::Other(Tag::CodeBlock(_)), ..],
+        )
+        | (
+            [AnnotatedBlockTag::Heading { .. }, ..],
+            [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],
+        )
+        | (
+            [AnnotatedBlockTag::Other(Tag::CodeBlock(_)), ..],
+            [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
+        )
+        | (
+            [AnnotatedBlockTag::Other(Tag::CodeBlock(_)), ..],
+            [AnnotatedBlockTag::Heading { .. }, ..],
+        )
+        | (
+            [AnnotatedBlockTag::Other(Tag::CodeBlock(_)), ..],
+            [AnnotatedBlockTag::List { .. }, ..],
+        )
+        | (
+            [AnnotatedBlockTag::Other(Tag::CodeBlock(_)), ..],
+            [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],
+        )
+        | (
+            [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],
+            [AnnotatedBlockTag::Heading { .. }, ..],
+        )
+        | (
+            [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],
+            [AnnotatedBlockTag::Other(Tag::CodeBlock(_)), ..],
+        )
+        | ([AnnotatedBlockTag::Other(Tag::BlockQuote), ..], [AnnotatedBlockTag::List { .. }, ..]) =>
+        {
             strategy = Some(TransitionStrategy::DoNothing);
         }
         (
-            [AnnotatedTag::Item { is_thin: is_thin1 }, ..],
-            [AnnotatedTag::Item { is_thin: is_thin2 }, ..],
+            [AnnotatedBlockTag::Item { is_thin: is_thin1 }, ..],
+            [AnnotatedBlockTag::Item { is_thin: is_thin2 }, ..],
         ) => {
             if !is_thin1.get() && !is_thin2.get() {
                 strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
@@ -922,12 +966,13 @@ fn process_tag_transition<'event>(
 
 fn process_block_singleton<'event>(
     writer: &mut dyn StrWrite,
-    context: &[AnnotatedTag<'event>],
-    block: &Event<'event>,
+    context: &[AnnotatedBlockTag<'event>],
+    block: &pulldown_cmark::Event<'event>,
 ) -> io::Result<()> {
+    use pulldown_cmark::Event;
     match block {
         Event::Rule => {
-            if let Some(AnnotatedTag::Item { .. }) = context.last() {
+            if let Some(AnnotatedBlockTag::Item { .. }) = context.last() {
                 writer.write_str("---")?;
             } else {
                 writer.write_str("***")?;
@@ -945,9 +990,9 @@ fn process_block_singleton<'event>(
 
 fn process_block_transition<'event>(
     writer: &mut dyn StrWrite,
-    remaining: &[AnnotatedTag<'event>],
-    _removal: &Event<'event>,
-    _incoming: &Event<'event>,
+    remaining: &[AnnotatedBlockTag<'event>],
+    _removal: &pulldown_cmark::Event<'event>,
+    _incoming: &pulldown_cmark::Event<'event>,
 ) -> io::Result<()> {
     writer.write_str("\n")?;
     renew_nonnesting_sequence_line_start(writer, &[remaining])?;
@@ -956,19 +1001,125 @@ fn process_block_transition<'event>(
 
 fn process_block_transition2<'event>(
     writer: &mut dyn StrWrite,
-    remaining: &[AnnotatedTag<'event>],
-    _removal: &Event<'event>,
-    _incoming: &[AnnotatedTag<'event>],
+    remaining: &[AnnotatedBlockTag<'event>],
+    _removal: &pulldown_cmark::Event<'event>,
+    _incoming: &[AnnotatedBlockTag<'event>],
 ) -> io::Result<()> {
     writer.write_str("\n")?;
     renew_nonnesting_sequence_line_start(writer, &[remaining])?;
     Ok(())
 }
 
+struct InlineGroupCtx {
+    counter: usize,
+}
+
+impl InlineGroupCtx {
+    fn new() -> Self {
+        InlineGroupCtx { counter: 0 }
+    }
+
+    fn allocate(&mut self) -> usize {
+        let val = self.counter;
+        self.counter += 1;
+        val
+    }
+
+    fn generate_reference_name<'event>(&mut self) -> pulldown_cmark::CowStr<'event> {
+        let id = self.allocate();
+        let str = format!("_autogen_{}", id);
+        str.into()
+    }
+}
+
+#[derive(Clone, Debug)]
+enum AnnotatedInlineTag<'event> {
+    Emphasis,
+    Strong,
+    Link {
+        kind: pulldown_cmark::LinkType,
+        uri: pulldown_cmark::CowStr<'event>,
+        title: pulldown_cmark::CowStr<'event>,
+        ref_name: pulldown_cmark::CowStr<'event>,
+    },
+    Image {
+        kind: pulldown_cmark::LinkType,
+        uri: pulldown_cmark::CowStr<'event>,
+        title: pulldown_cmark::CowStr<'event>,
+        ref_name: pulldown_cmark::CowStr<'event>,
+    },
+    Other(pulldown_cmark::Tag<'event>),
+}
+
+impl<'event> AnnotatedInlineTag<'event> {
+    fn from(ctx: &mut InlineGroupCtx, tag: pulldown_cmark::Tag<'event>) -> Self {
+        use pulldown_cmark::CowStr;
+        use pulldown_cmark::LinkType;
+        use pulldown_cmark::Tag;
+        match tag {
+            Tag::Emphasis => AnnotatedInlineTag::Emphasis,
+            Tag::Strong => AnnotatedInlineTag::Strong,
+            Tag::Link(kind, uri, title) => {
+                let ref_name = if kind == LinkType::Reference {
+                    ctx.generate_reference_name()
+                } else {
+                    CowStr::from("")
+                };
+                AnnotatedInlineTag::Link {
+                    kind,
+                    uri,
+                    title,
+                    ref_name,
+                }
+            }
+            Tag::Image(kind, uri, title) => {
+                let ref_name = if kind == LinkType::Reference {
+                    ctx.generate_reference_name()
+                } else {
+                    CowStr::from("")
+                };
+                AnnotatedInlineTag::Image {
+                    kind,
+                    uri,
+                    title,
+                    ref_name,
+                }
+            }
+            _ => AnnotatedInlineTag::Other(tag),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+enum AnnotatedNestedInlineEvent<'event> {
+    Event(pulldown_cmark::Event<'event>),
+    Group(
+        AnnotatedInlineTag<'event>,
+        Vec<AnnotatedNestedInlineEvent<'event>>,
+    ),
+}
+
+fn annotate_inline_group<'event>(
+    ctx: &mut InlineGroupCtx,
+    event: NestedInlineGroupEvent<'event>,
+) -> AnnotatedNestedInlineEvent<'event> {
+    match event {
+        NestedInlineGroupEvent::Inline(e) => AnnotatedNestedInlineEvent::Event(e),
+        NestedInlineGroupEvent::Group(t, inlines) => {
+            let t = AnnotatedInlineTag::from(ctx, t);
+            let inlines = inlines
+                .into_iter()
+                .map(|x| annotate_inline_group(ctx, x))
+                .collect();
+            AnnotatedNestedInlineEvent::Group(t, inlines)
+        }
+    }
+}
+
 fn process_inlines_group<'event>(
     writer: &mut dyn StrWrite,
-    context: &[AnnotatedTag<'event>],
-    inlines: &Vec<Event<'event>>,
+    context: &[AnnotatedBlockTag<'event>],
+    inlines: &Vec<AnnotatedNestedInlineEvent<'event>>,
 ) -> io::Result<()> {
     //resolve_emphasis_and_strong(inlines);
     //Self::process_definition_and_references(writer, context, sequence, &resolution)?;
@@ -980,9 +1131,10 @@ fn process_inlines_group<'event>(
 
 fn output_inline_contents<'event>(
     writer: &mut dyn StrWrite,
-    context: &[&[AnnotatedTag<'event>]],
-    inlines: &[Event<'event>],
+    context: &[&[AnnotatedBlockTag<'event>]],
+    inlines: &[AnnotatedNestedInlineEvent<'event>],
 ) -> io::Result<()> {
+    use pulldown_cmark::{Event, Tag};
     let containing_tag = context
         .iter()
         .rev()
@@ -991,42 +1143,144 @@ fn output_inline_contents<'event>(
         .next();
     for inline in inlines {
         match inline {
-            Event::Text(s) => {
-                let need_escape =
-                    !matches!(containing_tag, Some(AnnotatedTag::Other(Tag::CodeBlock(_))));
-                if need_escape {
-                    let escaped = escape_text(s);
-                    writer.write_str(&escaped)?;
-                } else {
-                    writer.write_str(s)?;
-                    if s.ends_with('\n') {
-                        renew_nonnesting_sequence_line_start(writer, context)?;
+            AnnotatedNestedInlineEvent::Event(e) => match e {
+                Event::Text(s) => {
+                    let need_escape = !matches!(
+                        containing_tag,
+                        Some(AnnotatedBlockTag::Other(Tag::CodeBlock(_)))
+                    );
+                    if need_escape {
+                        let escaped = escape_text(s);
+                        writer.write_str(&escaped)?;
+                    } else {
+                        writer.write_str(s)?;
+                        if s.ends_with('\n') {
+                            renew_nonnesting_sequence_line_start(writer, context)?;
+                        }
                     }
                 }
-            }
-            Event::Html(s) => writer.write_str(s)?,
-            Event::SoftBreak => {
-                writer.write_str("\n")?;
-                renew_nonnesting_sequence_line_start(writer, context)?;
-            }
-            Event::HardBreak => {
-                writer.write_str("\\\n")?;
-                renew_nonnesting_sequence_line_start(writer, context)?;
-            }
-            Event::Code(s) => {
-                writer.write_str("`")?;
-                writer.write_str(s)?;
-                writer.write_str("`")?;
-            }
-            Event::Start(Tag::Emphasis) | Event::End(Tag::Emphasis) => {
-                writer.write_str("*")?;
-            }
-            Event::Start(Tag::Strong) | Event::End(Tag::Strong) => {
-                writer.write_str("**")?;
-            }
-            _ => {
-                eprintln!("unsupported inline: {:?}", inline);
-            }
+                Event::Html(s) => writer.write_str(s)?,
+                Event::SoftBreak => {
+                    writer.write_str("\n")?;
+                    renew_nonnesting_sequence_line_start(writer, context)?;
+                }
+                Event::HardBreak => {
+                    writer.write_str("\\\n")?;
+                    renew_nonnesting_sequence_line_start(writer, context)?;
+                }
+                Event::Code(s) => {
+                    writer.write_str("`")?;
+                    writer.write_str(s)?;
+                    writer.write_str("`")?;
+                }
+                _ => {
+                    eprintln!("unsupported inline: {:?}", e);
+                }
+            },
+            AnnotatedNestedInlineEvent::Group(tag, inlines) => match tag {
+                AnnotatedInlineTag::Emphasis => {
+                    writer.write_str("*")?;
+                    output_inline_contents(writer, context, &inlines)?;
+                    writer.write_str("*")?;
+                }
+                AnnotatedInlineTag::Strong => {
+                    writer.write_str("**")?;
+                    output_inline_contents(writer, context, &inlines)?;
+                    writer.write_str("**")?;
+                }
+                AnnotatedInlineTag::Link {
+                    kind,
+                    uri,
+                    title,
+                    ref_name,
+                } => {
+                    use pulldown_cmark::LinkType;
+                    match kind {
+                        LinkType::Autolink | LinkType::Email => {
+                            writer.write_str("<")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str(">")?;
+                        }
+                        LinkType::Collapsed => {
+                            writer.write_str("[")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str("][]")?;
+                        }
+                        LinkType::Shortcut => {
+                            writer.write_str("[")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str("]")?;
+                        }
+                        LinkType::Reference => {
+                            writer.write_str("[")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str("][")?;
+                            writer.write_str(&ref_name)?;
+                            writer.write_str("]")?;
+                        }
+                        LinkType::Inline => {
+                            writer.write_str("[")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str("](")?;
+                            writer.write_str(&*escape_url(uri))?;
+                            if !title.is_empty() {
+                                writer.write_str(" \"")?;
+                                writer.write_str(&*escape_text(&title))?;
+                                writer.write_str("\"")?;
+                            }
+                            writer.write_str(")")?;
+                        }
+                        _ => {
+                            unreachable!()
+                        }
+                    }
+                }
+                AnnotatedInlineTag::Image {
+                    kind,
+                    uri,
+                    title,
+                    ref_name,
+                } => {
+                    use pulldown_cmark::LinkType;
+                    match kind {
+                        LinkType::Collapsed => {
+                            writer.write_str("![")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str("][]")?;
+                        }
+                        LinkType::Shortcut => {
+                            writer.write_str("![")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str("]")?;
+                        }
+                        LinkType::Reference => {
+                            writer.write_str("![")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str("][")?;
+                            writer.write_str(&ref_name)?;
+                            writer.write_str("]")?;
+                        }
+                        LinkType::Inline => {
+                            writer.write_str("![")?;
+                            output_inline_contents(writer, context, &inlines)?;
+                            writer.write_str("](")?;
+                            writer.write_str(&*escape_url(uri))?;
+                            if !title.is_empty() {
+                                writer.write_str(" \"")?;
+                                writer.write_str(&*escape_text(&title))?;
+                                writer.write_str("\"")?;
+                            }
+                            writer.write_str(")")?;
+                        }
+                        _ => {
+                            unreachable!()
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("unsupported inline: {:?}", inline);
+                }
+            },
         }
     }
     Ok(())
@@ -1055,6 +1309,14 @@ fn escape_text<'event>(input: &pulldown_cmark::CowStr<'event>) -> pulldown_cmark
     } else {
         input.clone()
     }
+}
+
+fn escape_url<'event>(input: &pulldown_cmark::CowStr<'event>) -> pulldown_cmark::CowStr<'event> {
+    let mut result_str = String::new();
+    result_str += "<";
+    result_str += &**input;
+    result_str += ">";
+    result_str.into()
 }
 
 #[cfg(test)]
