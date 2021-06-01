@@ -174,7 +174,10 @@ enum CodeBlockFenceStyle {
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum CodeBlockStyle {
     Indented,
-    Fenced { fence_style: CodeBlockFenceStyle },
+    Fenced {
+        fence_style: CodeBlockFenceStyle,
+        no_content: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -187,9 +190,9 @@ enum AnnotatedBlockTag<'event> {
         next_descendent_list_style_kind: Rc<Cell<ListStyleKind>>,
     },
     Item {
-        is_thin: Cell<bool>,
+        is_tight: Cell<bool>,
     },
-    ThinPara,
+    TightPara,
     Heading {
         level: u32,
         self_style: Rc<Cell<HeadingStyle>>,
@@ -217,7 +220,7 @@ impl<'event> AnnotatedBlockTag<'event> {
                 _ => false,
             },
             (AnnotatedBlockTag::Item { .. }, AnnotatedBlockTag::Item { .. }) => true,
-            (AnnotatedBlockTag::ThinPara { .. }, AnnotatedBlockTag::ThinPara { .. }) => true,
+            (AnnotatedBlockTag::TightPara { .. }, AnnotatedBlockTag::TightPara { .. }) => true,
             (
                 AnnotatedBlockTag::Heading { level: level1, .. },
                 AnnotatedBlockTag::Heading { level: level2, .. },
@@ -231,7 +234,22 @@ impl<'event> AnnotatedBlockTag<'event> {
                     info_string: rhs_info_string,
                     self_style: rhs_style,
                 },
-            ) => info_string == rhs_info_string && self_style.get() == rhs_style.get(),
+            ) => {
+                if info_string != rhs_info_string {
+                    return false;
+                }
+                match (self_style.get(), rhs_style.get()) {
+                    (CodeBlockStyle::Indented, CodeBlockStyle::Indented) => true,
+                    (
+                        CodeBlockStyle::Fenced { fence_style, .. },
+                        CodeBlockStyle::Fenced {
+                            fence_style: rhs_fence_style,
+                            ..
+                        },
+                    ) => fence_style == rhs_fence_style,
+                    _ => false,
+                }
+            }
             (AnnotatedBlockTag::Other(self_tag), AnnotatedBlockTag::Other(other_tag)) => {
                 self_tag == other_tag
             }
@@ -255,7 +273,7 @@ impl<'event> From<pulldown_cmark::Tag<'event>> for AnnotatedBlockTag<'event> {
                 }
             }
             Tag::Item => AnnotatedBlockTag::Item {
-                is_thin: Cell::new(false),
+                is_tight: Cell::new(false),
             },
             Tag::Heading(level) => AnnotatedBlockTag::Heading {
                 level,
@@ -275,7 +293,10 @@ impl<'event> From<pulldown_cmark::Tag<'event>> for AnnotatedBlockTag<'event> {
                             CodeBlockFenceStyle::Backtick
                         };
                         AnnotatedBlockTag::CodeBlock {
-                            self_style: Rc::new(Cell::new(CodeBlockStyle::Fenced { fence_style })),
+                            self_style: Rc::new(Cell::new(CodeBlockStyle::Fenced {
+                                fence_style,
+                                no_content: false,
+                            })),
                             info_string: info_str,
                         }
                     }
@@ -339,12 +360,9 @@ fn is_early_stop_skippable<'event>(tag: &AnnotatedBlockTag<'event>) -> bool {
         AnnotatedBlockTag::Root { .. } => true,
         AnnotatedBlockTag::Heading { self_style, .. } => self_style.get() != HeadingStyle::ATX,
         AnnotatedBlockTag::List { .. } => true,
-        AnnotatedBlockTag::ThinPara => true,
+        AnnotatedBlockTag::TightPara => true,
         AnnotatedBlockTag::Item { .. } => true,
-        AnnotatedBlockTag::CodeBlock { self_style, .. } => match self_style.get() {
-            CodeBlockStyle::Indented => true,
-            CodeBlockStyle::Fenced { .. } => false,
-        },
+        AnnotatedBlockTag::CodeBlock { .. } => true,
         AnnotatedBlockTag::Other(tag) => match tag {
             Tag::Paragraph => true,
             _ => false,
@@ -408,6 +426,20 @@ fn normalize_traverse_groups<'event>(
                     self_style.set(HeadingStyle::Setext);
                 }
             }
+        } else if let [InlineOrBlockTraverseGroup::Ascending(asc), InlineOrBlockTraverseGroup::Descending(desc), ..] =
+            &mut traverse_groups[idx..]
+        {
+            if let (
+                [.., AnnotatedBlockTag::CodeBlock { self_style, .. }],
+                [AnnotatedBlockTag::CodeBlock { .. }, ..],
+            ) = (&asc[..], &desc[..])
+            {
+                let mut style = self_style.get();
+                if let CodeBlockStyle::Fenced { no_content, .. } = &mut style {
+                    *no_content = true;
+                }
+                self_style.set(style);
+            }
         }
     }
 
@@ -422,6 +454,7 @@ fn normalize_traverse_groups<'event>(
     for idx in 0.. {
         if let Some(group) = traverse_groups.get(idx) {
             if let InlineOrBlockTraverseGroup::BlockSingleton(Event::Html(_)) = group {
+                /*
                 let count = traverse_groups[idx + 1..]
                     .iter()
                     .take_while(|x| {
@@ -449,58 +482,59 @@ fn normalize_traverse_groups<'event>(
                         ))),
                     );
                 }
+                */
             } else if let InlineOrBlockTraverseGroup::InlineGroup(_) = group {
-                let mut thin = false;
+                let mut tight = false;
                 if idx > 0 {
                     if let Some(InlineOrBlockTraverseGroup::Ascending(asc)) =
                         traverse_groups.get(idx - 1)
                     {
                         if let Some(AnnotatedBlockTag::Item { .. }) = asc.last() {
-                            thin = true;
+                            tight = true;
                         }
                     }
                 }
                 match traverse_groups.get(idx + 1) {
                     Some(InlineOrBlockTraverseGroup::BlockSingleton(_))
                     | Some(InlineOrBlockTraverseGroup::Ascending(_)) => {
-                        thin = true;
+                        tight = true;
                     }
                     Some(InlineOrBlockTraverseGroup::Descending(desc)) => {
                         if let Some(AnnotatedBlockTag::Item { .. }) = desc.first() {
-                            thin = true;
+                            tight = true;
                         }
                     }
                     _ => {}
                 }
-                if thin {
-                    let thin_para = AnnotatedBlockTag::ThinPara;
+                if tight {
+                    let tight_para = AnnotatedBlockTag::TightPara;
                     let mut offset = 0;
                     if idx == 0 {
                         traverse_groups.insert(
                             idx + offset,
-                            InlineOrBlockTraverseGroup::Ascending(vec![thin_para.clone()]),
+                            InlineOrBlockTraverseGroup::Ascending(vec![tight_para.clone()]),
                         );
                         offset = 1;
                     } else if let Some(InlineOrBlockTraverseGroup::Ascending(asc)) =
                         traverse_groups.get_mut(idx + offset - 1)
                     {
-                        asc.push(thin_para.clone());
+                        asc.push(tight_para.clone());
                     } else {
                         traverse_groups.insert(
                             idx + offset,
-                            InlineOrBlockTraverseGroup::Ascending(vec![thin_para.clone()]),
+                            InlineOrBlockTraverseGroup::Ascending(vec![tight_para.clone()]),
                         );
                         offset += 1;
                     }
-                    mark_item_tag_as_thin(&traverse_groups[..idx + offset]);
+                    mark_item_tag_as_tight(&traverse_groups[..idx + offset]);
                     if let Some(InlineOrBlockTraverseGroup::Descending(desc)) =
                         traverse_groups.get_mut(idx + offset + 1)
                     {
-                        desc.insert(0, thin_para);
+                        desc.insert(0, tight_para);
                     } else {
                         traverse_groups.insert(
                             idx + offset + 1,
-                            InlineOrBlockTraverseGroup::Descending(vec![thin_para]),
+                            InlineOrBlockTraverseGroup::Descending(vec![tight_para]),
                         );
                     }
                 }
@@ -511,7 +545,7 @@ fn normalize_traverse_groups<'event>(
     }
 }
 
-fn mark_item_tag_as_thin<'event>(traverse_groups: &[InlineOrBlockTraverseGroup<'event>]) {
+fn mark_item_tag_as_tight<'event>(traverse_groups: &[InlineOrBlockTraverseGroup<'event>]) {
     let mut tag_queue = VecDeque::new();
     for group in traverse_groups.iter().rev() {
         match group {
@@ -533,15 +567,15 @@ fn mark_item_tag_as_thin<'event>(traverse_groups: &[InlineOrBlockTraverseGroup<'
                         }
                     }
                     match tag {
-                        AnnotatedBlockTag::ThinPara => {
+                        AnnotatedBlockTag::TightPara => {
                             continue;
                         }
-                        AnnotatedBlockTag::Item { is_thin } => {
-                            is_thin.set(true);
+                        AnnotatedBlockTag::Item { is_tight } => {
+                            is_tight.set(true);
                             return;
                         }
                         _ => {
-                            eprintln!("Thin para in non-item context: {:?}", &asc[..idx]);
+                            eprintln!("tight para in non-item context: {:?}", &asc[..idx]);
                         }
                     }
                 }
@@ -561,7 +595,7 @@ fn find_active_list_style<'event>(
                 }
                 AnnotatedBlockTag::Root { .. }
                 | AnnotatedBlockTag::Item { .. }
-                | AnnotatedBlockTag::ThinPara
+                | AnnotatedBlockTag::TightPara
                 | AnnotatedBlockTag::Heading { .. }
                 | AnnotatedBlockTag::CodeBlock { .. }
                 | AnnotatedBlockTag::Other(_) => {}
@@ -589,7 +623,7 @@ fn find_next_descendent_list_style_kind<'event>(
                     return Some(next_descendent_list_style_kind.clone());
                 }
                 AnnotatedBlockTag::Item { .. }
-                | AnnotatedBlockTag::ThinPara
+                | AnnotatedBlockTag::TightPara
                 | AnnotatedBlockTag::Heading { .. }
                 | AnnotatedBlockTag::CodeBlock { .. }
                 | AnnotatedBlockTag::Other(_) => {}
@@ -638,7 +672,7 @@ fn renew_nonnesting_sequence_line_start<'event>(
                         );
                     }
                 }
-                AnnotatedBlockTag::ThinPara => {
+                AnnotatedBlockTag::TightPara => {
                     // do nothing
                 }
                 AnnotatedBlockTag::Heading { .. } => {
@@ -699,6 +733,7 @@ fn process_block_incoming<'event>(
                             *style_kind = active_list_style_kind.get();
                         }
                     }
+                    self_style.set(style);
                 } else {
                     eprintln!(
                         "list encountered but outer list context not found: {:?}",
@@ -736,7 +771,7 @@ fn process_block_incoming<'event>(
                     );
                 }
             }
-            AnnotatedBlockTag::ThinPara => {
+            AnnotatedBlockTag::TightPara => {
                 // do nothing
             }
             AnnotatedBlockTag::Heading { level, self_style } => match self_style.get() {
@@ -765,17 +800,22 @@ fn process_block_incoming<'event>(
                 CodeBlockStyle::Indented => {
                     writer.write_str("    ")?;
                 }
-                CodeBlockStyle::Fenced { fence_style } => {
+                CodeBlockStyle::Fenced {
+                    fence_style,
+                    no_content,
+                } => {
                     match fence_style {
                         CodeBlockFenceStyle::Backtick => writer.write_str("````")?,
                         CodeBlockFenceStyle::Tilde => writer.write_str("~~~~")?,
                     }
                     writer.write_str(info_string)?;
-                    writer.write_str("\n")?;
-                    renew_nonnesting_sequence_line_start(
-                        writer,
-                        &[remaining, &incoming[..idx + 1]],
-                    )?;
+                    if !no_content {
+                        writer.write_str("\n")?;
+                        renew_nonnesting_sequence_line_start(
+                            writer,
+                            &[remaining, &incoming[..idx + 1]],
+                        )?;
+                    }
                 }
             },
             _ => {
@@ -798,12 +838,33 @@ fn process_block_removal<'event>(
 ) -> io::Result<()> {
     use pulldown_cmark::Tag;
 
-    let mut need_newline = false;
+    #[derive(PartialEq, PartialOrd)]
+    enum RemovalStrategy {
+        DoNothing,
+        FenceEndLine,
+        ContentEndLine,
+    }
+
+    impl RemovalStrategy {
+        fn ensure_at_least(&mut self, val: RemovalStrategy) {
+            if *self < val {
+                *self = val;
+            }
+        }
+        fn replace_with(&mut self, val1: RemovalStrategy, val2: RemovalStrategy) {
+            if *self == val1 {
+                *self = val2;
+            }
+        }
+    }
+
+    let mut removal_strategy = RemovalStrategy::DoNothing;
 
     for (idx, tag) in removal.iter().enumerate().rev() {
         match tag {
             AnnotatedBlockTag::Root { .. } => {
-                // do nothing
+                removal_strategy
+                    .replace_with(RemovalStrategy::FenceEndLine, RemovalStrategy::DoNothing);
             }
             AnnotatedBlockTag::List { .. } => {
                 // do nothing
@@ -827,37 +888,35 @@ fn process_block_removal<'event>(
                         &[remaining, &removal[..idx]]
                     );
                 }
-                need_newline = true;
+                removal_strategy.ensure_at_least(RemovalStrategy::ContentEndLine);
             }
-            AnnotatedBlockTag::ThinPara => {
-                need_newline = true;
+            AnnotatedBlockTag::TightPara => {
+                removal_strategy.ensure_at_least(RemovalStrategy::ContentEndLine);
             }
-            AnnotatedBlockTag::Heading { level, self_style } => {
-                match self_style.get() {
-                    HeadingStyle::ATX => {}
-                    HeadingStyle::ATXWithClosing => {
-                        let level_str = &"#######"[..(*level) as usize];
-                        writer.write_str(" ")?;
-                        writer.write_str(level_str)?;
-                    }
-                    HeadingStyle::Setext => {
-                        writer.write_str("\n")?;
-                        renew_nonnesting_sequence_line_start(
-                            writer,
-                            &[remaining, &removal[..idx]],
-                        )?;
-                        if *level == 1 {
-                            writer.write_str("=========")?;
-                        } else {
-                            writer.write_str("---------")?;
-                        }
-                    }
+            AnnotatedBlockTag::Heading { level, self_style } => match self_style.get() {
+                HeadingStyle::ATX => {
+                    removal_strategy.ensure_at_least(RemovalStrategy::ContentEndLine);
                 }
-                need_newline = true;
-            }
+                HeadingStyle::ATXWithClosing => {
+                    let level_str = &"#######"[..(*level) as usize];
+                    writer.write_str(" ")?;
+                    writer.write_str(level_str)?;
+                    removal_strategy.ensure_at_least(RemovalStrategy::FenceEndLine);
+                }
+                HeadingStyle::Setext => {
+                    writer.write_str("\n")?;
+                    renew_nonnesting_sequence_line_start(writer, &[remaining, &removal[..idx]])?;
+                    if *level == 1 {
+                        writer.write_str("=========")?;
+                    } else {
+                        writer.write_str("---------")?;
+                    }
+                    removal_strategy.ensure_at_least(RemovalStrategy::FenceEndLine);
+                }
+            },
             AnnotatedBlockTag::Other(Tag::Paragraph)
             | AnnotatedBlockTag::Other(Tag::BlockQuote) => {
-                need_newline = true;
+                removal_strategy.ensure_at_least(RemovalStrategy::ContentEndLine);
             }
             AnnotatedBlockTag::Other(Tag::List(_))
             | AnnotatedBlockTag::Other(Tag::Item)
@@ -866,16 +925,16 @@ fn process_block_removal<'event>(
             }
             AnnotatedBlockTag::CodeBlock { self_style, .. } => match self_style.get() {
                 CodeBlockStyle::Indented => {
-                    need_newline = true;
+                    removal_strategy.ensure_at_least(RemovalStrategy::ContentEndLine);
                 }
-                CodeBlockStyle::Fenced { fence_style } => {
+                CodeBlockStyle::Fenced { fence_style, .. } => {
                     writer.write_str("\n")?;
                     renew_nonnesting_sequence_line_start(writer, &[remaining, &removal[..idx]])?;
                     match fence_style {
                         CodeBlockFenceStyle::Backtick => writer.write_str("````")?,
                         CodeBlockFenceStyle::Tilde => writer.write_str("~~~~")?,
                     }
-                    need_newline = true;
+                    removal_strategy = RemovalStrategy::FenceEndLine;
                 }
             },
             _ => {
@@ -887,11 +946,23 @@ fn process_block_removal<'event>(
             }
         }
     }
-    if need_newline {
-        writer.write_str("\n")?;
-        renew_nonnesting_sequence_line_start(writer, &[remaining])?;
+    match removal_strategy {
+        RemovalStrategy::FenceEndLine | RemovalStrategy::ContentEndLine => {
+            writer.write_str("\n")?;
+            renew_nonnesting_sequence_line_start(writer, &[remaining])?;
+        }
+        _ => {}
     }
     Ok(())
+}
+
+fn is_loose_item(context: &[AnnotatedBlockTag]) -> bool {
+    for tag in context.iter().rev() {
+        if let AnnotatedBlockTag::Item { is_tight } = tag {
+            return !is_tight.get();
+        }
+    }
+    false
 }
 
 fn process_tag_transition<'event>(
@@ -935,6 +1006,20 @@ fn process_tag_transition<'event>(
         ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::List { .. }, ..]) => {
             strategy = Some(TransitionStrategy::FlipListStyle)
         }
+        | ([AnnotatedBlockTag::TightPara, ..], [AnnotatedBlockTag::List { .. }, ..])
+        | ([AnnotatedBlockTag::TightPara, ..], [AnnotatedBlockTag::Other(Tag::BlockQuote), ..]) => {
+            strategy = Some(TransitionStrategy::DoNothing);
+        }
+        (
+            [AnnotatedBlockTag::Item { is_tight: is_tight1 }, ..],
+            [AnnotatedBlockTag::Item { is_tight: is_tight2 }, ..],
+        ) => {
+            if !is_tight1.get() && !is_tight2.get() {
+                strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
+            } else {
+                strategy = Some(TransitionStrategy::DoNothing);
+            }
+        }
         (
             [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
             [AnnotatedBlockTag::Heading { .. }, ..],
@@ -973,13 +1058,8 @@ fn process_tag_transition<'event>(
         )
         | ([AnnotatedBlockTag::Other(Tag::BlockQuote), ..], [AnnotatedBlockTag::List { .. }, ..]) =>
         {
-            strategy = Some(TransitionStrategy::DoNothing);
-        }
-        (
-            [AnnotatedBlockTag::Item { is_thin: is_thin1 }, ..],
-            [AnnotatedBlockTag::Item { is_thin: is_thin2 }, ..],
-        ) => {
-            if !is_thin1.get() && !is_thin2.get() {
+            let loose_item = is_loose_item(remaining);
+            if loose_item {
                 strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
             } else {
                 strategy = Some(TransitionStrategy::DoNothing);
@@ -1027,10 +1107,14 @@ fn process_tag_transition2<'event>(
     writer: &mut dyn StrWrite,
     remaining: &[AnnotatedBlockTag<'event>],
     _removal: &[AnnotatedBlockTag<'event>],
-    _incoming: &pulldown_cmark::Event<'event>,
+    incoming: &pulldown_cmark::Event<'event>,
 ) -> io::Result<()> {
     writer.write_str("\n")?;
     renew_nonnesting_sequence_line_start(writer, &[remaining])?;
+    if let pulldown_cmark::Event::Html(_) = incoming {
+        writer.write_str("\n")?;
+        renew_nonnesting_sequence_line_start(writer, &[remaining])?;
+    }
     Ok(())
 }
 
@@ -1050,6 +1134,9 @@ fn process_block_singleton<'event>(
         }
         Event::Html(s) => {
             writer.write_str(s)?;
+            if s.ends_with('\n') {
+                renew_nonnesting_sequence_line_start(writer, &[context])?;
+            }
         }
         _ => {
             eprintln!("unsupported block: {:?}", block);
@@ -1061,11 +1148,15 @@ fn process_block_singleton<'event>(
 fn process_block_transition<'event>(
     writer: &mut dyn StrWrite,
     remaining: &[AnnotatedBlockTag<'event>],
-    _removal: &pulldown_cmark::Event<'event>,
-    _incoming: &pulldown_cmark::Event<'event>,
+    removal: &pulldown_cmark::Event<'event>,
+    incoming: &pulldown_cmark::Event<'event>,
 ) -> io::Result<()> {
-    writer.write_str("\n")?;
-    renew_nonnesting_sequence_line_start(writer, &[remaining])?;
+    if let (pulldown_cmark::Event::Html(_), pulldown_cmark::Event::Html(_)) = (removal, incoming) {
+        // do nothing
+    } else {
+        writer.write_str("\n")?;
+        renew_nonnesting_sequence_line_start(writer, &[remaining])?;
+    }
     Ok(())
 }
 
@@ -1190,8 +1281,8 @@ fn process_inlines_group<'event>(
     context: &[AnnotatedBlockTag<'event>],
     inlines: &Vec<AnnotatedNestedInlineEvent<'event>>,
 ) -> io::Result<()> {
-    output_hoisted_references(writer, &[context], &inlines[..])?;
     output_inline_contents(writer, &[context], &inlines[..])?;
+    output_hoisted_references(writer, &[context], &inlines[..])?;
 
     Ok(())
 }
@@ -1225,6 +1316,10 @@ fn output_hoisted_references<'event>(
                     ref_name,
                 } => match kind {
                     LinkType::Collapsed | LinkType::Shortcut | LinkType::Reference => {
+                        writer.write_str("\n")?;
+                        renew_nonnesting_sequence_line_start(writer, context)?;
+                        writer.write_str("\n")?;
+                        renew_nonnesting_sequence_line_start(writer, context)?;
                         writer.write_str("[")?;
                         if *kind == LinkType::Reference {
                             writer.write_str(&ref_name)?;
@@ -1238,8 +1333,6 @@ fn output_hoisted_references<'event>(
                             writer.write_str(&*escape_text(&title))?;
                             writer.write_str("\"")?;
                         }
-                        writer.write_str("\n")?;
-                        renew_nonnesting_sequence_line_start(writer, context)?;
                         output_hoisted_references(writer, context, inlines)?;
                     }
                     _ => output_hoisted_references(writer, context, inlines)?,
