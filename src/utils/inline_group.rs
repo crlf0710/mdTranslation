@@ -23,8 +23,18 @@ where
     Iter: Iterator<Item = pulldown_cmark::Event<'event>>,
 {
     pub(crate) fn next_inline_group_event(&mut self) -> Option<InlineGroupEvent<'event>> {
-        let first_event = match self.inner_iter.next() {
-            Some(e) => e,
+        let first_event;
+        loop {
+            match self.inner_iter.next() {
+                Some(e) => {
+                    if let pulldown_cmark::Event::Html(s) = &e {
+                        if !self.conservative && &**s == crate::roundtrip::SPECIAL_SEPARATOR_WITH_EOL {
+                            continue;
+                        }
+                    }
+                    first_event = e;
+                    break;
+                }
             None => {
                 if !self.allow_unpaired_block_events && !self.noninline_event_stack.is_empty() {
                     panic!("Unpaired markdown block events found");
@@ -32,7 +42,8 @@ where
                 return None;
             }
         };
-        if is_block_event(&first_event) {
+        }
+        if is_block_event(&first_event, &self.noninline_event_stack) {
             match &first_event {
                 pulldown_cmark::Event::Start(tag) => {
                     self.noninline_event_stack.push(tag.clone());
@@ -50,7 +61,7 @@ where
         } else {
             let mut inlines = vec![first_event];
             while let Some(cur_event) = self.inner_iter.peek() {
-                if is_block_event(&cur_event) {
+                if is_block_event(&cur_event, &self.noninline_event_stack) {
                     break;
                 }
                 inlines.extend(self.inner_iter.next());

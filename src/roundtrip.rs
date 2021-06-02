@@ -1,13 +1,12 @@
 use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
 use crate::utils::{NestedInlineGroupEvent, NestedInlineGroupIteratorExt};
-use pulldown_cmark::{
-    escape::{StrWrite, WriteWrapper},
-    CowStr,
-};
+use pulldown_cmark::escape::{StrWrite, WriteWrapper};
 use std::io::{self, Write};
 use std::mem;
 use std::rc::Rc;
 use std::{cell::Cell, collections::VecDeque};
+
+pub(crate) const SPECIAL_SEPARATOR_WITH_EOL: &'static str = "<!-- ** ROUNDTRIP SEPARATOR ** -->\n";
 
 /// Iterate over an `Iterator` of `Event`s, generate HTML for each `Event`, and
 /// push it to a `String`.
@@ -173,7 +172,9 @@ enum CodeBlockFenceStyle {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 enum CodeBlockStyle {
-    Indented,
+    Indented {
+        special_case: bool,
+    },
     Fenced {
         fence_style: CodeBlockFenceStyle,
         no_content: bool,
@@ -188,17 +189,16 @@ enum AnnotatedBlockTag<'event> {
     List {
         self_style: Rc<Cell<ListStyle>>,
         next_descendent_list_style_kind: Rc<Cell<ListStyleKind>>,
+        is_tight: Rc<Cell<bool>>,
     },
-    Item {
-        is_tight: Cell<bool>,
-    },
+    Item,
     TightPara,
     Heading {
         level: u32,
         self_style: Rc<Cell<HeadingStyle>>,
     },
     CodeBlock {
-        info_string: CowStr<'event>,
+        info_string: pulldown_cmark::CowStr<'event>,
         self_style: Rc<Cell<CodeBlockStyle>>,
     },
     Other(pulldown_cmark::Tag<'event>),
@@ -239,7 +239,7 @@ impl<'event> AnnotatedBlockTag<'event> {
                     return false;
                 }
                 match (self_style.get(), rhs_style.get()) {
-                    (CodeBlockStyle::Indented, CodeBlockStyle::Indented) => true,
+                    (CodeBlockStyle::Indented { .. }, CodeBlockStyle::Indented { .. }) => true,
                     (
                         CodeBlockStyle::Fenced { fence_style, .. },
                         CodeBlockStyle::Fenced {
@@ -270,11 +270,10 @@ impl<'event> From<pulldown_cmark::Tag<'event>> for AnnotatedBlockTag<'event> {
                 AnnotatedBlockTag::List {
                     self_style: Rc::new(Cell::new(liststyle)),
                     next_descendent_list_style_kind: Rc::new(Cell::new(ListStyleKind::Style1)),
+                    is_tight: Rc::new(Cell::new(false)),
                 }
             }
-            Tag::Item => AnnotatedBlockTag::Item {
-                is_tight: Cell::new(false),
-            },
+            Tag::Item => AnnotatedBlockTag::Item,
             Tag::Heading(level) => AnnotatedBlockTag::Heading {
                 level,
                 self_style: Rc::new(Cell::new(HeadingStyle::ATX)),
@@ -283,8 +282,10 @@ impl<'event> From<pulldown_cmark::Tag<'event>> for AnnotatedBlockTag<'event> {
                 use pulldown_cmark::CodeBlockKind;
                 match kind {
                     CodeBlockKind::Indented => AnnotatedBlockTag::CodeBlock {
-                        self_style: Rc::new(Cell::new(CodeBlockStyle::Indented)),
-                        info_string: CowStr::from(""),
+                        self_style: Rc::new(Cell::new(CodeBlockStyle::Indented {
+                            special_case: false,
+                        })),
+                        info_string: pulldown_cmark::CowStr::from(""),
                     },
                     CodeBlockKind::Fenced(info_str) => {
                         let fence_style = if info_str.contains('`') {
@@ -307,6 +308,7 @@ impl<'event> From<pulldown_cmark::Tag<'event>> for AnnotatedBlockTag<'event> {
     }
 }
 
+#[derive(Debug)]
 enum InlineOrBlockTraverseGroup<'event> {
     Ascending(Vec<AnnotatedBlockTag<'event>>),
     Descending(Vec<AnnotatedBlockTag<'event>>),
@@ -406,24 +408,37 @@ fn normalize_traverse_groups<'event>(
     }
 
     for idx in 0..traverse_groups.len() {
-        if let [InlineOrBlockTraverseGroup::Ascending(asc), InlineOrBlockTraverseGroup::InlineGroup(group), InlineOrBlockTraverseGroup::Descending(_desc), ..] =
+        if let [InlineOrBlockTraverseGroup::Ascending(asc), InlineOrBlockTraverseGroup::InlineGroup(group), tail @ ..] =
             &mut traverse_groups[idx..]
         {
-            if let [.., AnnotatedBlockTag::CodeBlock { .. }] = &asc[..] {
-                if let [.., Event::Text(s)] = &mut group[..] {
-                    if s.ends_with('\n') {
-                        let mut str = s.to_string();
-                        str.pop();
-                        *s = str.into();
+            if let [.., AnnotatedBlockTag::CodeBlock { self_style, .. }] = &asc[..] {
+                if let [InlineOrBlockTraverseGroup::Descending(_desc), ..] = tail {
+                    if let [.., Event::Text(s)] = &mut group[..] {
+                        if s.ends_with('\n') {
+                            let mut str = s.to_string();
+                            str.pop();
+                            *s = str.into();
+                        }
+                    }
+                }
+                let mut style = self_style.get();
+                if let CodeBlockStyle::Indented { special_case } = &mut style {
+                    if let [Event::Text(s), ..] = &mut group[..] {
+                        if s.starts_with(' ') {
+                            *special_case = true;
+                            self_style.set(style);
+                        }
                     }
                 }
             } else if let [.., AnnotatedBlockTag::Heading { self_style, .. }] = &asc[..] {
-                if let [Event::Text(s)] = &mut group[..] {
-                    if s.is_empty() {
-                        self_style.set(HeadingStyle::ATXWithClosing);
+                if let [InlineOrBlockTraverseGroup::Descending(_desc), ..] = tail {
+                    if let [Event::Text(s)] = &mut group[..] {
+                        if s.is_empty() {
+                            self_style.set(HeadingStyle::ATXWithClosing);
+                        }
+                    } else if group.contains(&Event::SoftBreak) {
+                        self_style.set(HeadingStyle::Setext);
                     }
-                } else if group.contains(&Event::SoftBreak) {
-                    self_style.set(HeadingStyle::Setext);
                 }
             }
         } else if let [InlineOrBlockTraverseGroup::Ascending(asc), InlineOrBlockTraverseGroup::Descending(desc), ..] =
@@ -440,6 +455,16 @@ fn normalize_traverse_groups<'event>(
                 }
                 self_style.set(style);
             }
+        } else if let [InlineOrBlockTraverseGroup::BlockSingleton(block), InlineOrBlockTraverseGroup::Descending(_), ..] =
+            &mut traverse_groups[idx..]
+        {
+            if let Event::Html(s) = block {
+                if s.ends_with('\n') {
+                    let mut str = s.to_string();
+                    str.pop();
+                    *s = str.into();
+                }
+            }
         }
     }
 
@@ -449,41 +474,10 @@ fn normalize_traverse_groups<'event>(
             InlineOrBlockTraverseGroup::EarlyStop,
         );
     }
-    // merge sibling html blocks since they're actually one single block.
-    // NOTE: this is not the proper way.
+
     for idx in 0.. {
         if let Some(group) = traverse_groups.get(idx) {
-            if let InlineOrBlockTraverseGroup::BlockSingleton(Event::Html(_)) = group {
-                /*
-                let count = traverse_groups[idx + 1..]
-                    .iter()
-                    .take_while(|x| {
-                        matches!(
-                            x,
-                            InlineOrBlockTraverseGroup::BlockSingleton(Event::Html(_))
-                        )
-                    })
-                    .count();
-                if count > 0 {
-                    let content: String = traverse_groups[idx..idx + 1 + count]
-                        .iter()
-                        .flat_map(|x| {
-                            if let InlineOrBlockTraverseGroup::BlockSingleton(Event::Html(s)) = x {
-                                s.chars()
-                            } else {
-                                unreachable!()
-                            }
-                        })
-                        .collect();
-                    traverse_groups.splice(
-                        idx..idx + 1 + count,
-                        Some(InlineOrBlockTraverseGroup::BlockSingleton(Event::Html(
-                            content.into(),
-                        ))),
-                    );
-                }
-                */
-            } else if let InlineOrBlockTraverseGroup::InlineGroup(_) = group {
+            if let InlineOrBlockTraverseGroup::InlineGroup(_) = group {
                 let mut tight = false;
                 if idx > 0 {
                     if let Some(InlineOrBlockTraverseGroup::Ascending(asc)) =
@@ -494,7 +488,11 @@ fn normalize_traverse_groups<'event>(
                         }
                     }
                 }
-                match traverse_groups.get(idx + 1) {
+                let mut offset = 0;
+                if let Some(InlineOrBlockTraverseGroup::EarlyStop) = traverse_groups.get(idx + 1) {
+                    offset = 1;
+                }
+                match traverse_groups.get(idx + offset + 1) {
                     Some(InlineOrBlockTraverseGroup::BlockSingleton(_))
                     | Some(InlineOrBlockTraverseGroup::Ascending(_)) => {
                         tight = true;
@@ -570,12 +568,15 @@ fn mark_item_tag_as_tight<'event>(traverse_groups: &[InlineOrBlockTraverseGroup<
                         AnnotatedBlockTag::TightPara => {
                             continue;
                         }
-                        AnnotatedBlockTag::Item { is_tight } => {
+                        AnnotatedBlockTag::Item => {
+                            continue;
+                        }
+                        AnnotatedBlockTag::List { is_tight, .. } => {
                             is_tight.set(true);
                             return;
                         }
                         _ => {
-                            eprintln!("tight para in non-item context: {:?}", &asc[..idx]);
+                            eprintln!("tight para in non-item context: {:?}", &asc[..=idx]);
                         }
                     }
                 }
@@ -657,13 +658,13 @@ fn renew_nonnesting_sequence_line_start<'event>(
                         let style = list_style.get();
                         match style {
                             ListStyle::Ordered(_, ordinal) => {
-                                let str = format!("{}  ", ordinal)
+                                let str = format!("  {}  ", ordinal)
                                     .chars()
                                     .map(|_| ' ')
                                     .collect::<String>();
                                 writer.write_str(&str)?;
                             }
-                            ListStyle::Unordered(_) => writer.write_str("  ")?,
+                            ListStyle::Unordered(_) => writer.write_str("     ")?,
                         }
                     } else {
                         eprintln!(
@@ -691,7 +692,7 @@ fn renew_nonnesting_sequence_line_start<'event>(
                 }
                 AnnotatedBlockTag::CodeBlock { self_style, .. } => {
                     match self_style.get() {
-                        CodeBlockStyle::Indented => {
+                        CodeBlockStyle::Indented { .. } => {
                             writer.write_str("    ")?;
                         }
                         CodeBlockStyle::Fenced { .. } => {
@@ -749,18 +750,18 @@ fn process_block_incoming<'event>(
                     match style {
                         ListStyle::Ordered(list_style_kind, ordinal) => match list_style_kind {
                             ListStyleKind::Style1 => {
-                                write!(writer, "{}. ", ordinal)?;
+                                write!(writer, "  {}. ", ordinal)?;
                             }
                             ListStyleKind::Style2 => {
-                                write!(writer, "{}) ", ordinal)?;
+                                write!(writer, "  {}) ", ordinal)?;
                             }
                         },
                         ListStyle::Unordered(list_style_kind) => match list_style_kind {
                             ListStyleKind::Style1 => {
-                                writer.write_str("* ")?;
+                                writer.write_str("   * ")?;
                             }
                             ListStyleKind::Style2 => {
-                                writer.write_str("- ")?;
+                                writer.write_str("   - ")?;
                             }
                         },
                     }
@@ -797,7 +798,7 @@ fn process_block_incoming<'event>(
                 self_style,
                 info_string,
             } => match self_style.get() {
-                CodeBlockStyle::Indented => {
+                CodeBlockStyle::Indented { .. } => {
                     writer.write_str("    ")?;
                 }
                 CodeBlockStyle::Fenced {
@@ -924,7 +925,7 @@ fn process_block_removal<'event>(
                 unreachable!()
             }
             AnnotatedBlockTag::CodeBlock { self_style, .. } => match self_style.get() {
-                CodeBlockStyle::Indented => {
+                CodeBlockStyle::Indented { .. } => {
                     removal_strategy.ensure_at_least(RemovalStrategy::ContentEndLine);
                 }
                 CodeBlockStyle::Fenced { fence_style, .. } => {
@@ -956,9 +957,9 @@ fn process_block_removal<'event>(
     Ok(())
 }
 
-fn is_loose_item(context: &[AnnotatedBlockTag]) -> bool {
+fn is_loose_list(context: &[AnnotatedBlockTag]) -> bool {
     for tag in context.iter().rev() {
-        if let AnnotatedBlockTag::Item { is_tight } = tag {
+        if let AnnotatedBlockTag::List { is_tight, .. } = tag {
             return !is_tight.get();
         }
     }
@@ -976,6 +977,7 @@ fn process_tag_transition<'event>(
         DoNothing,
         FlipListStyle,
         ExtraNewlineAndRenew,
+        ExtraNewlineAndRenewForceSeparate,
     }
     let mut strategy = None;
     match (removal, incoming) {
@@ -999,22 +1001,37 @@ fn process_tag_transition<'event>(
             [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
         )
         | ([AnnotatedBlockTag::Other(Tag::Paragraph), ..], [AnnotatedBlockTag::List { .. }, ..])
-        | ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::Other(Tag::Paragraph), ..])
-        | ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::CodeBlock { .. }, ..]) => {
+        | ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::Other(Tag::Paragraph), ..]) => {
             strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
+        }
+        (
+            [AnnotatedBlockTag::List { .. }, ..],
+            [AnnotatedBlockTag::CodeBlock { self_style, .. }, ..],
+        ) => {
+            // there's a rare case that we can't easily roundtrip generate.
+            let mut special_case = false;
+            if matches!(
+                self_style.get(),
+                CodeBlockStyle::Indented { special_case: true }
+            ) {
+                special_case = true;
+            }
+            if special_case {
+                strategy = Some(TransitionStrategy::ExtraNewlineAndRenewForceSeparate);
+            } else {
+                strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
+            }
         }
         ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::List { .. }, ..]) => {
             strategy = Some(TransitionStrategy::FlipListStyle)
         }
-        | ([AnnotatedBlockTag::TightPara, ..], [AnnotatedBlockTag::List { .. }, ..])
-        | ([AnnotatedBlockTag::TightPara, ..], [AnnotatedBlockTag::Other(Tag::BlockQuote), ..]) => {
+        ([AnnotatedBlockTag::TightPara, ..], [AnnotatedBlockTag::List { .. }, ..])
+        | ([AnnotatedBlockTag::TightPara, ..], [AnnotatedBlockTag::Other(Tag::BlockQuote), ..])
+        | ([AnnotatedBlockTag::TightPara, ..], [AnnotatedBlockTag::Heading { .. }, ..]) => {
             strategy = Some(TransitionStrategy::DoNothing);
         }
-        (
-            [AnnotatedBlockTag::Item { is_tight: is_tight1 }, ..],
-            [AnnotatedBlockTag::Item { is_tight: is_tight2 }, ..],
-        ) => {
-            if !is_tight1.get() && !is_tight2.get() {
+        ([AnnotatedBlockTag::Item, ..], [AnnotatedBlockTag::Item, ..]) => {
+            if is_loose_list(remaining) {
                 strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
             } else {
                 strategy = Some(TransitionStrategy::DoNothing);
@@ -1032,6 +1049,7 @@ fn process_tag_transition<'event>(
             [AnnotatedBlockTag::Heading { .. }, ..],
             [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
         )
+        | ([AnnotatedBlockTag::Heading { .. }, ..], [AnnotatedBlockTag::TightPara, ..])
         | ([AnnotatedBlockTag::Heading { .. }, ..], [AnnotatedBlockTag::Heading { .. }, ..])
         | ([AnnotatedBlockTag::Heading { .. }, ..], [AnnotatedBlockTag::CodeBlock { .. }, ..])
         | (
@@ -1058,7 +1076,7 @@ fn process_tag_transition<'event>(
         )
         | ([AnnotatedBlockTag::Other(Tag::BlockQuote), ..], [AnnotatedBlockTag::List { .. }, ..]) =>
         {
-            let loose_item = is_loose_item(remaining);
+            let loose_item = is_loose_list(remaining);
             if loose_item {
                 strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
             } else {
@@ -1096,6 +1114,14 @@ fn process_tag_transition<'event>(
             }
         }
         TransitionStrategy::ExtraNewlineAndRenew => {
+            writer.write_str("\n")?;
+            renew_nonnesting_sequence_line_start(writer, &[remaining])?;
+        }
+        TransitionStrategy::ExtraNewlineAndRenewForceSeparate => {
+            writer.write_str("\n")?;
+            renew_nonnesting_sequence_line_start(writer, &[remaining])?;
+            writer.write_str(SPECIAL_SEPARATOR_WITH_EOL)?;
+            renew_nonnesting_sequence_line_start(writer, &[remaining])?;
             writer.write_str("\n")?;
             renew_nonnesting_sequence_line_start(writer, &[remaining])?;
         }
@@ -1193,10 +1219,21 @@ impl InlineGroupCtx {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum EmphasisStrongStyle {
+    Undecided,
+    Asterisk,
+    Underline,
+}
+
 #[derive(Clone, Debug)]
 enum AnnotatedInlineTag<'event> {
-    Emphasis,
-    Strong,
+    Emphasis {
+        self_style: Rc<Cell<EmphasisStrongStyle>>,
+    },
+    Strong {
+        self_style: Rc<Cell<EmphasisStrongStyle>>,
+    },
     Link {
         kind: pulldown_cmark::LinkType,
         uri: pulldown_cmark::CowStr<'event>,
@@ -1217,13 +1254,17 @@ impl<'event> AnnotatedInlineTag<'event> {
         use pulldown_cmark::LinkType;
         use pulldown_cmark::Tag;
         match tag {
-            Tag::Emphasis => AnnotatedInlineTag::Emphasis,
-            Tag::Strong => AnnotatedInlineTag::Strong,
+            Tag::Emphasis => AnnotatedInlineTag::Emphasis {
+                self_style: Rc::new(Cell::new(EmphasisStrongStyle::Undecided)),
+            },
+            Tag::Strong => AnnotatedInlineTag::Strong {
+                self_style: Rc::new(Cell::new(EmphasisStrongStyle::Undecided)),
+            },
             Tag::Link(kind, uri, title) => {
                 let ref_name = if kind == LinkType::Reference {
                     ctx.generate_reference_name()
                 } else {
-                    CowStr::from("")
+                    pulldown_cmark::CowStr::from("")
                 };
                 AnnotatedInlineTag::Link {
                     kind,
@@ -1236,7 +1277,7 @@ impl<'event> AnnotatedInlineTag<'event> {
                 let ref_name = if kind == LinkType::Reference {
                     ctx.generate_reference_name()
                 } else {
-                    CowStr::from("")
+                    pulldown_cmark::CowStr::from("")
                 };
                 AnnotatedInlineTag::Image {
                     kind,
@@ -1281,9 +1322,182 @@ fn process_inlines_group<'event>(
     context: &[AnnotatedBlockTag<'event>],
     inlines: &Vec<AnnotatedNestedInlineEvent<'event>>,
 ) -> io::Result<()> {
+    if let Ok(()) = resolve_strong_emphasis_styles(
+        context,
+        &inlines[..],
+        StrongEmphasisResolutionState::BlockLevel,
+    ) {
+        // continue
+    } else {
+        eprintln!(
+            "failed to find a proper set of strong and emphasis styles for {:?}",
+            inlines
+        );
+    }
     output_inline_contents(writer, &[context], &inlines[..])?;
     output_hoisted_references(writer, &[context], &inlines[..])?;
 
+    Ok(())
+}
+
+#[derive(PartialEq)]
+enum StrongEmphasisResolutionState {
+    BlockLevel,
+    Unconstrained,
+    Emphasis {
+        self_style: EmphasisStrongStyle,
+        previous_is_whitespace_or_punctuation: bool,
+        next_is_whitespace_or_punctuation: bool,
+    },
+    Strong {
+        self_style: EmphasisStrongStyle,
+        previous_is_whitespace_or_punctuation: bool,
+        next_is_whitespace_or_punctuation: bool,
+    },
+}
+
+fn get_neighboring_character<'event>(
+    inline: Option<&AnnotatedNestedInlineEvent<'event>>,
+    start_side: bool,
+) -> Option<char> {
+    use pulldown_cmark::Event;
+    let inline = inline?;
+    match inline {
+        AnnotatedNestedInlineEvent::Event(e) => match e {
+            Event::Text(s) | Event::Html(s) => {
+                let ch = if start_side {
+                    s.chars().nth(0)
+                } else {
+                    s.chars().last()
+                };
+                ch
+            }
+            _ => None,
+        },
+        AnnotatedNestedInlineEvent::Group(_tag, _inlines) => None,
+    }
+}
+
+fn resolve_strong_emphasis_styles<'event>(
+    context: &[AnnotatedBlockTag<'event>],
+    inlines: &[AnnotatedNestedInlineEvent<'event>],
+    outer_state: StrongEmphasisResolutionState,
+) -> Result<(), ()> {
+    use crate::utils::{is_punctuation, is_whitespace};
+
+    let inline_len = inlines.len();
+    for (idx, inline) in inlines.iter().enumerate() {
+        match inline {
+            AnnotatedNestedInlineEvent::Event(_) => continue,
+            AnnotatedNestedInlineEvent::Group(tag, inner_inlines) => {
+                let (is_emphasis, target_style);
+                match tag {
+                    AnnotatedInlineTag::Emphasis { self_style } => {
+                        is_emphasis = true;
+                        target_style = self_style;
+                    }
+                    AnnotatedInlineTag::Strong { self_style } => {
+                        is_emphasis = false;
+                        target_style = self_style;
+                    }
+                    _ => {
+                        resolve_strong_emphasis_styles(
+                            context,
+                            inner_inlines,
+                            StrongEmphasisResolutionState::Unconstrained,
+                        )?;
+                        continue;
+                    }
+                }
+                let (previous, next);
+                if idx > 0 {
+                    previous = inlines.get(idx - 1);
+                } else {
+                    previous = None;
+                }
+                next = inlines.get(idx + 1);
+                let previous_ch = get_neighboring_character(previous, false);
+                let next_ch = get_neighboring_character(next, true);
+
+                let mut succeeded = false;
+                for &current_selection in &[
+                    EmphasisStrongStyle::Underline,
+                    EmphasisStrongStyle::Asterisk,
+                ] {
+                    match outer_state {
+                        StrongEmphasisResolutionState::BlockLevel => {}
+                        StrongEmphasisResolutionState::Unconstrained => {}
+                        StrongEmphasisResolutionState::Emphasis {
+                            self_style: outer_style,
+                            previous_is_whitespace_or_punctuation: outer_previous_is_whitespace_or_punctuation,
+                            next_is_whitespace_or_punctuation: outer_next_is_whitespace_or_punctuation,
+                        } => {
+                            if is_emphasis && outer_style == current_selection {
+                                continue;
+                            }
+                            if idx == 0 && !outer_previous_is_whitespace_or_punctuation && outer_style != current_selection {
+                                continue;
+                            }
+                            if idx + 1 == inline_len && !outer_next_is_whitespace_or_punctuation && outer_style != current_selection {
+                                continue;
+                            }
+                        }
+                        StrongEmphasisResolutionState::Strong {
+                            self_style: outer_style,
+                            previous_is_whitespace_or_punctuation: outer_previous_is_whitespace_or_punctuation,
+                            next_is_whitespace_or_punctuation: outer_next_is_whitespace_or_punctuation,
+                        } => {
+                            if is_emphasis && outer_style == current_selection {
+                                continue;
+                            }
+                            if idx == 0 && !outer_previous_is_whitespace_or_punctuation && outer_style != current_selection {
+                                continue;
+                            }
+                            if idx + 1 == inline_len && !outer_next_is_whitespace_or_punctuation && outer_style != current_selection {
+                                continue;
+                            }
+                        }
+                    }
+                    let previous_ch = previous_ch.clone().unwrap_or(' ');
+                    let next_ch = next_ch.clone().unwrap_or(' ');
+                    let previous_is_whitespace_or_punctuation =
+                        is_whitespace(previous_ch) || is_punctuation(previous_ch);
+                    let next_is_whitespace_or_punctuation =
+                        is_whitespace(next_ch) || is_punctuation(next_ch);
+                    if current_selection == EmphasisStrongStyle::Underline {
+                        if !previous_is_whitespace_or_punctuation
+                            || !next_is_whitespace_or_punctuation
+                        {
+                            continue;
+                        }
+                    }
+                    target_style.set(current_selection);
+                    let outer_state = if is_emphasis {
+                        StrongEmphasisResolutionState::Emphasis {
+                            self_style: current_selection,
+                            previous_is_whitespace_or_punctuation,
+                            next_is_whitespace_or_punctuation
+                        }
+                    } else {
+                        StrongEmphasisResolutionState::Strong {
+                            self_style: current_selection,
+                            previous_is_whitespace_or_punctuation,
+                            next_is_whitespace_or_punctuation
+                        }
+                    };
+                    if let Ok(()) =
+                        resolve_strong_emphasis_styles(context, inner_inlines, outer_state)
+                    {
+                        succeeded = true;
+                        break;
+                    }
+                }
+                if !succeeded {
+                    return Err(());
+                }
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1299,10 +1513,12 @@ fn output_hoisted_references<'event>(
                 // do nothing
             }
             AnnotatedNestedInlineEvent::Group(t, inlines) => match t {
-                AnnotatedInlineTag::Emphasis => {
+                AnnotatedInlineTag::Emphasis { .. } => {
                     output_hoisted_references(writer, context, inlines)?
                 }
-                AnnotatedInlineTag::Strong => output_hoisted_references(writer, context, inlines)?,
+                AnnotatedInlineTag::Strong { .. } => {
+                    output_hoisted_references(writer, context, inlines)?
+                }
                 AnnotatedInlineTag::Link {
                     kind,
                     uri,
@@ -1411,15 +1627,23 @@ fn output_inline_contents<'event>(
                 }
             },
             AnnotatedNestedInlineEvent::Group(tag, inlines) => match tag {
-                AnnotatedInlineTag::Emphasis => {
-                    writer.write_str("*")?;
+                AnnotatedInlineTag::Emphasis { self_style } => {
+                    let delimiter = match self_style.get() {
+                        EmphasisStrongStyle::Underline => "_",
+                        _ => "*",
+                    };
+                    writer.write_str(delimiter)?;
                     output_inline_contents(writer, context, &inlines)?;
-                    writer.write_str("*")?;
+                    writer.write_str(delimiter)?;
                 }
-                AnnotatedInlineTag::Strong => {
-                    writer.write_str("**")?;
+                AnnotatedInlineTag::Strong { self_style } => {
+                    let delimiter = match self_style.get() {
+                        EmphasisStrongStyle::Underline => "__",
+                        _ => "**",
+                    };
+                    writer.write_str(delimiter)?;
                     output_inline_contents(writer, context, &inlines)?;
-                    writer.write_str("**")?;
+                    writer.write_str(delimiter)?;
                 }
                 AnnotatedInlineTag::Link {
                     kind,
