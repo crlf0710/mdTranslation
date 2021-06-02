@@ -575,6 +575,10 @@ fn mark_item_tag_as_tight<'event>(traverse_groups: &[InlineOrBlockTraverseGroup<
                             is_tight.set(true);
                             return;
                         }
+                        AnnotatedBlockTag::Other( pulldown_cmark::Tag::BlockQuote ) => {
+                            // somehow pulldown_cmark generate tight paragraphs within block quote.
+                            return;
+                        }
                         _ => {
                             eprintln!("tight para in non-item context: {:?}", &asc[..=idx]);
                         }
@@ -1340,7 +1344,7 @@ fn process_inlines_group<'event>(
     Ok(())
 }
 
-#[derive(PartialEq)]
+#[derive(PartialEq, Debug)]
 enum StrongEmphasisResolutionState {
     BlockLevel,
     Unconstrained,
@@ -1424,42 +1428,76 @@ fn resolve_strong_emphasis_styles<'event>(
                     EmphasisStrongStyle::Underline,
                     EmphasisStrongStyle::Asterisk,
                 ] {
+                    let mut outer_previous_is_whitespace_or_punctuation = None;
+                    let mut outer_next_is_whitespace_or_punctuation = None;
                     match outer_state {
                         StrongEmphasisResolutionState::BlockLevel => {}
                         StrongEmphasisResolutionState::Unconstrained => {}
                         StrongEmphasisResolutionState::Emphasis {
                             self_style: outer_style,
-                            previous_is_whitespace_or_punctuation: outer_previous_is_whitespace_or_punctuation,
-                            next_is_whitespace_or_punctuation: outer_next_is_whitespace_or_punctuation,
+                            previous_is_whitespace_or_punctuation,
+                            next_is_whitespace_or_punctuation,
                         } => {
                             if is_emphasis && outer_style == current_selection {
                                 continue;
                             }
-                            if idx == 0 && !outer_previous_is_whitespace_or_punctuation && outer_style != current_selection {
+                            if idx == 0
+                                && !previous_is_whitespace_or_punctuation
+                                && outer_style != current_selection
+                            {
                                 continue;
                             }
-                            if idx + 1 == inline_len && !outer_next_is_whitespace_or_punctuation && outer_style != current_selection {
+                            if idx + 1 == inline_len
+                                && !next_is_whitespace_or_punctuation
+                                && outer_style != current_selection
+                            {
                                 continue;
                             }
+                            outer_previous_is_whitespace_or_punctuation =
+                                Some(previous_is_whitespace_or_punctuation);
+                            outer_next_is_whitespace_or_punctuation =
+                                Some(next_is_whitespace_or_punctuation);
                         }
                         StrongEmphasisResolutionState::Strong {
                             self_style: outer_style,
-                            previous_is_whitespace_or_punctuation: outer_previous_is_whitespace_or_punctuation,
-                            next_is_whitespace_or_punctuation: outer_next_is_whitespace_or_punctuation,
+                            previous_is_whitespace_or_punctuation,
+                            next_is_whitespace_or_punctuation,
                         } => {
                             if is_emphasis && outer_style == current_selection {
                                 continue;
                             }
-                            if idx == 0 && !outer_previous_is_whitespace_or_punctuation && outer_style != current_selection {
+                            if idx == 0
+                                && !previous_is_whitespace_or_punctuation
+                                && outer_style != current_selection
+                            {
                                 continue;
                             }
-                            if idx + 1 == inline_len && !outer_next_is_whitespace_or_punctuation && outer_style != current_selection {
+                            if idx + 1 == inline_len
+                                && !next_is_whitespace_or_punctuation
+                                && outer_style != current_selection
+                            {
                                 continue;
                             }
+                            outer_previous_is_whitespace_or_punctuation =
+                                Some(previous_is_whitespace_or_punctuation);
+                            outer_next_is_whitespace_or_punctuation =
+                                Some(next_is_whitespace_or_punctuation);
                         }
                     }
-                    let previous_ch = previous_ch.clone().unwrap_or(' ');
-                    let next_ch = next_ch.clone().unwrap_or(' ');
+                    let previous_ch = if let Some(ch) = previous_ch.clone() {
+                        ch
+                    } else if let Some(false) = outer_previous_is_whitespace_or_punctuation {
+                        'a'
+                    } else {
+                        ' '
+                    };
+                    let next_ch = if let Some(ch) = next_ch.clone() {
+                        ch
+                    } else if let Some(false) = outer_next_is_whitespace_or_punctuation {
+                        'a'
+                    } else {
+                        ' '
+                    };
                     let previous_is_whitespace_or_punctuation =
                         is_whitespace(previous_ch) || is_punctuation(previous_ch);
                     let next_is_whitespace_or_punctuation =
@@ -1476,13 +1514,13 @@ fn resolve_strong_emphasis_styles<'event>(
                         StrongEmphasisResolutionState::Emphasis {
                             self_style: current_selection,
                             previous_is_whitespace_or_punctuation,
-                            next_is_whitespace_or_punctuation
+                            next_is_whitespace_or_punctuation,
                         }
                     } else {
                         StrongEmphasisResolutionState::Strong {
                             self_style: current_selection,
                             previous_is_whitespace_or_punctuation,
-                            next_is_whitespace_or_punctuation
+                            next_is_whitespace_or_punctuation,
                         }
                     };
                     if let Ok(()) =

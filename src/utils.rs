@@ -2,16 +2,16 @@ use pulldown_cmark::{Event, Tag};
 
 mod inline_group;
 mod nested_inline_group;
+mod puncttable;
 mod vec_map;
 mod vec_set;
-mod puncttable;
 
-pub(crate) use inline_group::{InlineGroupIteratorExt, InlineGroupEvent};
-pub(crate) use nested_inline_group::{NestedInlineGroupIteratorExt, NestedInlineGroupEvent};
+pub(crate) use inline_group::{InlineGroupEvent, InlineGroupIteratorExt};
+pub(crate) use nested_inline_group::{NestedInlineGroupEvent, NestedInlineGroupIteratorExt};
 pub(crate) use vec_map::VecMap;
 pub(crate) use vec_set::VecSet;
 
-pub(crate) fn is_whitespace (ch: char) -> bool {
+pub(crate) fn is_whitespace(ch: char) -> bool {
     ch.is_whitespace()
 }
 pub(crate) use puncttable::is_punctuation;
@@ -40,7 +40,10 @@ pub(crate) fn normalize_inlines(inlines: &mut Vec<Event<'_>>, conservative: bool
     }
 }
 
-pub(crate) fn is_block_event<'event>(event: &pulldown_cmark::Event<'event>, context: &Vec<Tag<'event>>) -> bool {
+pub(crate) fn is_block_event<'event>(
+    event: &pulldown_cmark::Event<'event>,
+    context: &Vec<Tag<'event>>,
+) -> bool {
     match event {
         Event::Start(tag) | Event::End(tag) => {
             let tag: &pulldown_cmark::Tag = tag;
@@ -67,9 +70,7 @@ pub(crate) fn is_block_event<'event>(event: &pulldown_cmark::Event<'event>, cont
                 | Tag::Image(_, _, _) => false,
             }
         }
-        Event::Html(text) => {
-            context.is_empty() || text.ends_with("\n")
-        }
+        Event::Html(text) => context.is_empty() || text.ends_with("\n"),
         Event::Rule => true,
         Event::Text(_)
         | Event::Code(_)
@@ -79,4 +80,3 @@ pub(crate) fn is_block_event<'event>(event: &pulldown_cmark::Event<'event>, cont
         | Event::TaskListMarker(_) => false,
     }
 }
-
