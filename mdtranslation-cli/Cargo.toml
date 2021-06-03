@@ -6,6 +6,7 @@ edition = "2018"
 description = "Command-line tools for using mdTranslation, which can be used to prepare multi-lingual Markdown documents"
 keywords = ["localization", "translation", "markdown", "commonmark"]
 categories = ["text-processing", "localization"]
+repository = "https://github.com/crlf0710/mdTranslation"
 
 [dependencies]
 mdtranslation = {version = "0.1", path = ".."}

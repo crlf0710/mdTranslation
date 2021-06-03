@@ -6,6 +6,7 @@ edition = "2018"
 description = "A utility to prepare multi-lingual mdBook books"
 keywords = ["localization", "translation", "mdbook", "markdown"]
 categories = ["text-processing", "localization"]
+repository = "https://github.com/crlf0710/mdTranslation"
 
 [dependencies]
 mdtranslation = { version = "0.1.0", path = ".." }
