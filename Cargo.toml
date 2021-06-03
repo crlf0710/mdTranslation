@@ -5,6 +5,9 @@ authors = ["CrLF0710 <crlf0710@gmail.com>"]
 license = "MIT OR Apache-2.0"
 edition = "2018"
 
+[workspace]
+members = ["mdbook-translation"]
+
 [dependencies]
 pulldown-cmark = "0.8.0"
 

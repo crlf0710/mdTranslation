@@ -11,7 +11,7 @@ pub(crate) const SPECIAL_SEPARATOR_WITH_EOL: &'static str = "<!-- ** ROUNDTRIP S
 /// Iterate over an `Iterator` of `Event`s, generate HTML for each `Event`, and
 /// push it to a `String`.
 #[allow(unused)]
-pub(crate) fn push_markdown<'a, I>(s: &mut String, iter: I)
+pub fn push_markdown<'a, I>(s: &mut String, iter: I)
 where
     I: Iterator<Item = pulldown_cmark::Event<'a>>,
 {
@@ -25,7 +25,7 @@ where
 /// will result in poor performance. Wrap these in a
 /// [`BufWriter`](https://doc.rust-lang.org/std/io/struct.BufWriter.html) to
 /// prevent unnecessary slowdowns.
-pub(crate) fn write_markdown<'a, I, W>(writer: W, iter: I) -> io::Result<()>
+pub fn write_markdown<'a, I, W>(writer: W, iter: I) -> io::Result<()>
 where
     I: Iterator<Item = pulldown_cmark::Event<'a>>,
     W: Write,
