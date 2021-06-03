@@ -5,6 +5,8 @@ use mdtranslation::roundtrip::push_markdown;
 use mdtranslation::translation::translate;
 use pulldown_cmark::Parser;
 
+const PREPROCESSOR_NAME: &str = "mdbook-translation";
+
 pub(crate) struct TranslationPreprocessor {}
 
 impl TranslationPreprocessor {
@@ -15,39 +17,39 @@ impl TranslationPreprocessor {
 
 impl Preprocessor for TranslationPreprocessor {
     fn name(&self) -> &str {
-        "mdbook-translation"
+        PREPROCESSOR_NAME
     }
 
     fn run(&self, ctx: &PreprocessorContext, mut book: Book) -> Result<Book, Error> {
         let source_dir = ctx.root.join(&ctx.config.book.src);
-        let input_path = if let Some(path) = std::env::var("MDTRANSLATION_INPUT").ok() {
+        let input_path = if let Ok(path) = std::env::var("MDTRANSLATION_INPUT") {
             source_dir.join(path)
         } else {
             eprintln!(
                 "{}: MDTRANSLATION_INPUT is not set, skipping.",
-                "mdbook-translation"
+                PREPROCESSOR_NAME
             );
             return Ok(book);
         };
-        let lang = if let Some(lang) = std::env::var("MDTRANSLATION_LANG").ok() {
+        let lang = if let Ok(lang) = std::env::var("MDTRANSLATION_LANG") {
             lang
         } else {
             eprintln!(
                 "{}: MDTRANSLATION_LANG is not set, skipping.",
-                "mdbook-translation"
+                PREPROCESSOR_NAME
             );
             return Ok(book);
         };
 
         let input_data = std::fs::read_to_string(input_path)?;
         let input_events = Parser::new(&input_data).collect::<Vec<_>>();
-        let default_lang = if let Some(lang) = std::env::var("MDTRANSLATION_DEFAULT_LANG").ok() {
+        let default_lang = if let Ok(lang) = std::env::var("MDTRANSLATION_DEFAULT_LANG") {
             lang
         } else {
             let lang = "en_US";
             eprintln!(
                 "{}: MDTRANSLATION_DEFAULT_LANG is not set, defaulting to `{}`.",
-                "mdbook-translation", lang
+                PREPROCESSOR_NAME, lang
             );
             lang.to_string()
         };
@@ -56,18 +58,16 @@ impl Preprocessor for TranslationPreprocessor {
             mdbook::BookItem::Chapter(chapter) => {
                 let content_events = Parser::new(&chapter.content);
                 let mut new_contents = String::new();
-                if let Err(_) = translate(
+                if translate(
                     content_events,
                     input_events.iter().cloned(),
                     &lang,
                     Some(&default_lang),
                 )
-                .and_then(|translated| {
-                    push_markdown(&mut new_contents, translated);
-                    Ok(())
-                }) {
-                    eprintln!("{}: Failed to process chapter.", "mdbook-translation");
-                    return;
+                .map(|translated| push_markdown(&mut new_contents, translated))
+                .is_err()
+                {
+                    eprintln!("{}: Failed to process chapter.", PREPROCESSOR_NAME);
                 }
             }
             mdbook::BookItem::Separator => {}

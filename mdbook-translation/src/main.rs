@@ -36,7 +36,7 @@ fn handle_preprocessing(pre: &dyn Preprocessor) -> Result<(), Error> {
     let book_version = Version::parse(&ctx.mdbook_version)?;
     let version_req = VersionReq::parse(mdbook::MDBOOK_VERSION)?;
 
-    if version_req.matches(&book_version) != true {
+    if !version_req.matches(&book_version) {
         eprintln!(
             "Warning: The {} plugin was built against version {} of mdbook, \
              but we're being called from version {}",
