@@ -2,8 +2,8 @@ use std::iter::Peekable;
 
 use pulldown_cmark::{CodeBlockKind, CowStr, Event, Tag};
 
-use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
 use crate::utils::VecMap;
+use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
 
 fn erase_cowstr_lifetime(c: &CowStr<'_>) -> CowStr<'static> {
     match c {
@@ -134,6 +134,8 @@ fn recognize_one_item<'event>(
             lang = None;
             translated_text = erase_events_lifetime(translated_group);
             remaining_contents = &remaining_contents[3..];
+        } else if let [InlineGroupEvent::NonInline(Event::Rule)] = remaining_contents {
+            break;
         } else {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,

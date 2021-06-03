@@ -8,6 +8,7 @@ fn translation_1() -> () {
     let translation = r"> world
 
 kitty
+****
 > Hello world!
 
 Nice to meet you!";

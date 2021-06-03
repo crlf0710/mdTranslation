@@ -21,6 +21,7 @@ fn process_event<'event>(
     result.push(Event::Start(Tag::Paragraph));
     result.extend(event_group);
     result.push(Event::End(Tag::Paragraph));
+    result.push(Event::Rule);
     result
 }
 
