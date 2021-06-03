@@ -1,9 +1,9 @@
 use mdbook::book::Book;
 use mdbook::errors::Error;
 use mdbook::preprocess::{Preprocessor, PreprocessorContext};
+use mdtranslation::pulldown_cmark::Parser;
 use mdtranslation::roundtrip::push_markdown;
 use mdtranslation::translation::translate;
-use pulldown_cmark::Parser;
 
 const PREPROCESSOR_NAME: &str = "mdbook-translation";
 

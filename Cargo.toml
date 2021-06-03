@@ -6,11 +6,7 @@ license = "MIT OR Apache-2.0"
 edition = "2018"
 
 [workspace]
-members = ["mdbook-translation"]
+members = ["mdtranslation-cli", "mdbook-translation"]
 
 [dependencies]
 pulldown-cmark = "0.8.0"
-
-[dev-dependencies]
-anyhow = "1.0.40"
-structopt = "0.3.21"

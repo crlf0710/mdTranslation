@@ -1,5 +1,5 @@
 use mdtranslation::extraction;
-use pulldown_cmark;
+use mdtranslation::pulldown_cmark;
 use structopt::StructOpt;
 
 use std::path::PathBuf;
