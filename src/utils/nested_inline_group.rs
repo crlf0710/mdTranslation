@@ -125,7 +125,9 @@ where
     }
 }
 
-pub(crate) trait NestedInlineGroupIteratorExt<'event>: Iterator<Item = pulldown_cmark::Event<'event>> {
+pub(crate) trait NestedInlineGroupIteratorExt<'event>:
+    Iterator<Item = pulldown_cmark::Event<'event>>
+{
     fn into_nested_inline_groups(self) -> NestedInlineGroupIter<'event, Self>
     where
         Self: Sized;

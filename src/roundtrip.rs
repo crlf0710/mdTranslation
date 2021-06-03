@@ -575,7 +575,7 @@ fn mark_item_tag_as_tight<'event>(traverse_groups: &[InlineOrBlockTraverseGroup<
                             is_tight.set(true);
                             return;
                         }
-                        AnnotatedBlockTag::Other( pulldown_cmark::Tag::BlockQuote ) => {
+                        AnnotatedBlockTag::Other(pulldown_cmark::Tag::BlockQuote) => {
                             // somehow pulldown_cmark generate tight paragraphs within block quote.
                             return;
                         }
@@ -1005,7 +1005,10 @@ fn process_tag_transition<'event>(
             [AnnotatedBlockTag::Other(Tag::Paragraph), ..],
         )
         | ([AnnotatedBlockTag::Other(Tag::Paragraph), ..], [AnnotatedBlockTag::List { .. }, ..])
-        | ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::Other(Tag::Paragraph), ..]) => {
+        | ([AnnotatedBlockTag::CodeBlock { .. }, ..], [AnnotatedBlockTag::CodeBlock { .. }, ..])
+        | ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::Other(Tag::Paragraph), ..])
+        | ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::Other(Tag::BlockQuote), ..])
+        | ([AnnotatedBlockTag::List { .. }, ..], [AnnotatedBlockTag::Heading { .. }, ..]) => {
             strategy = Some(TransitionStrategy::ExtraNewlineAndRenew);
         }
         (
@@ -1056,6 +1059,7 @@ fn process_tag_transition<'event>(
         | ([AnnotatedBlockTag::Heading { .. }, ..], [AnnotatedBlockTag::TightPara, ..])
         | ([AnnotatedBlockTag::Heading { .. }, ..], [AnnotatedBlockTag::Heading { .. }, ..])
         | ([AnnotatedBlockTag::Heading { .. }, ..], [AnnotatedBlockTag::CodeBlock { .. }, ..])
+        | ([AnnotatedBlockTag::Heading { .. }, ..], [AnnotatedBlockTag::List { .. }, ..])
         | (
             [AnnotatedBlockTag::Heading { .. }, ..],
             [AnnotatedBlockTag::Other(Tag::BlockQuote), ..],

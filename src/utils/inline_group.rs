@@ -28,20 +28,22 @@ where
             match self.inner_iter.next() {
                 Some(e) => {
                     if let pulldown_cmark::Event::Html(s) = &e {
-                        if !self.conservative && &**s == crate::roundtrip::SPECIAL_SEPARATOR_WITH_EOL {
+                        if !self.conservative
+                            && &**s == crate::roundtrip::SPECIAL_SEPARATOR_WITH_EOL
+                        {
                             continue;
                         }
                     }
                     first_event = e;
                     break;
                 }
-            None => {
-                if !self.allow_unpaired_block_events && !self.noninline_event_stack.is_empty() {
-                    panic!("Unpaired markdown block events found");
+                None => {
+                    if !self.allow_unpaired_block_events && !self.noninline_event_stack.is_empty() {
+                        panic!("Unpaired markdown block events found");
+                    }
+                    return None;
                 }
-                return None;
-            }
-        };
+            };
         }
         if is_block_event(&first_event, &self.noninline_event_stack) {
             match &first_event {
@@ -107,7 +109,9 @@ where
     }
 }
 
-pub(crate) trait InlineGroupIteratorExt<'event>: Iterator<Item = pulldown_cmark::Event<'event>> {
+pub(crate) trait InlineGroupIteratorExt<'event>:
+    Iterator<Item = pulldown_cmark::Event<'event>>
+{
     fn into_inline_groups(self) -> InlineGroupIter<'event, Self>
     where
         Self: Sized;

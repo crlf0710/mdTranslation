@@ -1,6 +1,6 @@
-use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
 use crate::roundtrip::write_markdown;
 use crate::utils::VecSet;
+use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
 use pulldown_cmark::{Event, Tag};
 
 fn process_event<'event>(

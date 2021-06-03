@@ -1,4 +1,3 @@
-
 pub(crate) struct VecMap<K, V>(Vec<(K, V)>);
 
 impl<K: PartialEq, V> VecMap<K, V> {

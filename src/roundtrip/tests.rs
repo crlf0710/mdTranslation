@@ -59,17 +59,33 @@ fn test_roundtrip(original: &str, expected: &str) -> bool {
         .iter()
         .cloned()
         .into_inline_groups_nonconservative()
-        .eq(event_list_2.iter().cloned().into_inline_groups_nonconservative())
+        .eq(event_list_2
+            .iter()
+            .cloned()
+            .into_inline_groups_nonconservative())
     {
         return true;
     }
-    let event_count = event_list.iter().cloned().into_inline_groups_nonconservative().count();
-    let event_count_2 = event_list_2.iter().cloned().into_inline_groups_nonconservative().count();
+    let event_count = event_list
+        .iter()
+        .cloned()
+        .into_inline_groups_nonconservative()
+        .count();
+    let event_count_2 = event_list_2
+        .iter()
+        .cloned()
+        .into_inline_groups_nonconservative()
+        .count();
     let same_event_count = event_list
         .iter()
         .cloned()
         .into_inline_groups_nonconservative()
-        .zip(event_list_2.iter().cloned().into_inline_groups_nonconservative())
+        .zip(
+            event_list_2
+                .iter()
+                .cloned()
+                .into_inline_groups_nonconservative(),
+        )
         .take_while(|(e1, e2)| e1 == e2)
         .count();
     if event_count == same_event_count && event_count_2 == same_event_count {

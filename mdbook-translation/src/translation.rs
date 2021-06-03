@@ -41,7 +41,17 @@ impl Preprocessor for TranslationPreprocessor {
             return Ok(book);
         };
 
-        let input_data = std::fs::read_to_string(input_path)?;
+        let input_data = match std::fs::read_to_string(&input_path) {
+            Ok(data) => data,
+            Err(e) => {
+                eprintln!(
+                    "{}: failed to open `{}`.",
+                    PREPROCESSOR_NAME,
+                    input_path.display()
+                );
+                return Err(e.into());
+            }
+        };
         let input_events = Parser::new(&input_data).collect::<Vec<_>>();
         let default_lang = if let Ok(lang) = std::env::var("MDTRANSLATION_DEFAULT_LANG") {
             lang
@@ -68,7 +78,9 @@ impl Preprocessor for TranslationPreprocessor {
                 .is_err()
                 {
                     eprintln!("{}: Failed to process chapter.", PREPROCESSOR_NAME);
+                    return;
                 }
+                chapter.content = new_contents;
             }
             mdbook::BookItem::Separator => {}
             mdbook::BookItem::PartTitle(_) => {}
