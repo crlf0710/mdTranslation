@@ -2,6 +2,7 @@
 name = "mdbook-translation"
 version = "0.1.0"
 authors = ["Charles Lew <crlf0710@gmail.com>"]
+license = "MIT OR Apache-2.0"
 edition = "2018"
 description = "A utility to prepare multi-lingual mdBook books"
 keywords = ["localization", "translation", "mdbook", "markdown"]
