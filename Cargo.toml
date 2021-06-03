@@ -2,8 +2,12 @@
 name = "mdtranslation"
 version = "0.1.0"
 authors = ["CrLF0710 <crlf0710@gmail.com>"]
+description = "A utility to prepare multi-lingual Markdown documents"
 license = "MIT OR Apache-2.0"
 edition = "2018"
+readme = "README.md"
+keywords = ["localization", "translation", "markdown", "commonmark"]
+categories = ["text-processing", "localization"]
 
 [workspace]
 members = ["mdtranslation-cli", "mdbook-translation"]
