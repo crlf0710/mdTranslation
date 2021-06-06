@@ -1,9 +1,9 @@
 use mdbook::book::Book;
 use mdbook::errors::Error;
 use mdbook::preprocess::{Preprocessor, PreprocessorContext};
-use mdtranslation::pulldown_cmark::Parser;
+use mdtranslation::pulldown_cmark::{self, Parser};
 use mdtranslation::roundtrip::push_markdown;
-use mdtranslation::translation::translate;
+use mdtranslation::translation::{translate_ext, TranslationOptions};
 
 const PREPROCESSOR_NAME: &str = "mdbook-translation";
 
@@ -64,15 +64,23 @@ impl Preprocessor for TranslationPreprocessor {
             lang.to_string()
         };
 
+        let parse_options = pulldown_cmark::Options::empty();
+
+        let translation_options = TranslationOptions {
+            extract_link_contents: true,
+            ignore_duplicate_items: true,
+        };
+
         book.for_each_mut(|item| match item {
             mdbook::BookItem::Chapter(chapter) => {
-                let content_events = Parser::new(&chapter.content);
+                let content_events = Parser::new_ext(&chapter.content, parse_options);
                 let mut new_contents = String::new();
-                if translate(
+                if translate_ext(
                     content_events,
                     input_events.iter().cloned(),
                     &lang,
                     Some(&default_lang),
+                    translation_options.clone(),
                 )
                 .map(|translated| push_markdown(&mut new_contents, translated))
                 .is_err()
@@ -82,13 +90,14 @@ impl Preprocessor for TranslationPreprocessor {
                     chapter.content = new_contents;
                 }
 
-                let title_events = Parser::new(&chapter.name);
+                let title_events = Parser::new_ext(&chapter.name, parse_options);
                 let mut new_contents = String::new();
-                if translate(
+                if translate_ext(
                     title_events,
                     input_events.iter().cloned(),
                     &lang,
                     Some(&default_lang),
+                    translation_options.clone(),
                 )
                 .map(|translated| push_markdown(&mut new_contents, translated))
                 .is_err()
@@ -100,13 +109,14 @@ impl Preprocessor for TranslationPreprocessor {
             }
             mdbook::BookItem::Separator => {}
             mdbook::BookItem::PartTitle(title) => {
-                let title_events = Parser::new(title);
+                let title_events = Parser::new_ext(title, parse_options);
                 let mut new_contents = String::new();
-                if translate(
+                if translate_ext(
                     title_events,
                     input_events.iter().cloned(),
                     &lang,
                     Some(&default_lang),
+                    translation_options.clone(),
                 )
                 .map(|translated| push_markdown(&mut new_contents, translated))
                 .is_err()

@@ -62,9 +62,46 @@ fn erase_events_lifetime(events: &Vec<Event<'_>>) -> Vec<Event<'static>> {
     events.iter().map(erase_event_lifetime).collect()
 }
 
+fn find_link_contents<'event>(events: &[Event<'event>]) -> Option<Vec<Event<'event>>> {
+    if let [Event::Start(Tag::Link(lt, target, title)), middle @ .., Event::End(Tag::Link(end_lt, end_target, end_title))] =
+        events
+    {
+        if lt != end_lt || target != end_target || title != end_title {
+            return None;
+        }
+        for event in middle.iter() {
+            match event {
+                Event::Start(_) => break,
+                Event::End(_) => {
+                    return None;
+                }
+                _ => {},
+            }
+        }
+        for event in middle.iter().rev() {
+            match event {
+                Event::End(_) => break,
+                Event::Start(_) => {
+                    return None;
+                }
+                _ => {},
+            }
+        }
+        Some(middle.iter().cloned().collect())
+    } else {
+        None
+    }
+}
+
 #[derive(Default)]
 struct TranslationData {
     data_map: VecMap<Vec<Event<'static>>, Vec<Event<'static>>>,
+}
+
+#[derive(Default, Clone)]
+pub struct TranslationOptions {
+    pub extract_link_contents: bool,
+    pub ignore_duplicate_items: bool,
 }
 
 fn recognize_one_item<'event>(
@@ -72,6 +109,7 @@ fn recognize_one_item<'event>(
     events: &mut Peekable<impl Iterator<Item = InlineGroupEvent<'event>>>,
     selected_lang: &str,
     use_default_lang: bool,
+    options: &TranslationOptions,
 ) -> std::io::Result<Option<()>> {
     if !matches!(
         events.peek(),
@@ -161,14 +199,36 @@ fn recognize_one_item<'event>(
         }
 
         if translation_data.data_map.contains(&original_text) {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Duplicate entry: {:?}", original_text),
-            ));
+            if !options.ignore_duplicate_items {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("Duplicate entry: {:?}", original_text),
+                ));
+            }
         } else {
             translation_data
                 .data_map
-                .insert(original_text.clone(), translated_text);
+                .insert(original_text.clone(), translated_text.clone());
+        }
+
+        if options.extract_link_contents {
+            if let (Some(original_link_contents), Some(translated_link_contents)) = (
+                find_link_contents(&original_text),
+                find_link_contents(&translated_text),
+            ) {
+                if translation_data.data_map.contains(&original_link_contents) {
+                    if !options.ignore_duplicate_items {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidInput,
+                            format!("Duplicate entry: {:?}", original_text),
+                        ));
+                    }
+                } else {
+                    translation_data
+                        .data_map
+                        .insert(original_link_contents, translated_link_contents);
+                }
+            }
         }
     }
     Ok(Some(()))
@@ -179,14 +239,18 @@ impl TranslationData {
         events: impl Iterator<Item = Event<'ttext>>,
         default_lang: Option<&str>,
         lang: &str,
+        options: TranslationOptions,
     ) -> std::io::Result<Self> {
         let mut events = events.into_inline_groups().peekable();
         let use_default_lang = default_lang == Some(lang);
         let mut translation_data = TranslationData::default();
-        while let Some(()) =
-            recognize_one_item(&mut translation_data, &mut events, lang, use_default_lang)?
-        {
-        }
+        while let Some(()) = recognize_one_item(
+            &mut translation_data,
+            &mut events,
+            lang,
+            use_default_lang,
+            &options,
+        )? {}
         Ok(translation_data)
     }
 
@@ -207,17 +271,27 @@ impl TranslationData {
     }
 }
 
+pub fn translate_ext<'event>(
+    input: impl Iterator<Item = Event<'event>>,
+    translation: impl Iterator<Item = Event<'event>>,
+    lang: &str,
+    default_lang: Option<&str>,
+    options: TranslationOptions,
+) -> std::io::Result<impl Iterator<Item = Event<'event>>> {
+    let t = TranslationData::load(translation, default_lang, lang, options)?;
+    let iter = input
+        .into_inline_groups()
+        .flat_map(move |e| t.process_inline_group_event(e));
+    Ok(iter)
+}
+
 pub fn translate<'event>(
     input: impl Iterator<Item = Event<'event>>,
     translation: impl Iterator<Item = Event<'event>>,
     lang: &str,
     default_lang: Option<&str>,
 ) -> std::io::Result<impl Iterator<Item = Event<'event>>> {
-    let t = TranslationData::load(translation, default_lang, lang)?;
-    let iter = input
-        .into_inline_groups()
-        .flat_map(move |e| t.process_inline_group_event(e));
-    Ok(iter)
+    translate_ext(input, translation, lang, default_lang, Default::default())
 }
 
 #[cfg(test)]
