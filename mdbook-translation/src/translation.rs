@@ -78,12 +78,44 @@ impl Preprocessor for TranslationPreprocessor {
                 .is_err()
                 {
                     eprintln!("{}: Failed to process chapter.", PREPROCESSOR_NAME);
-                    return;
+                } else {
+                    chapter.content = new_contents;
                 }
-                chapter.content = new_contents;
+
+                let title_events = Parser::new(&chapter.name);
+                let mut new_contents = String::new();
+                if translate(
+                    title_events,
+                    input_events.iter().cloned(),
+                    &lang,
+                    Some(&default_lang),
+                )
+                .map(|translated| push_markdown(&mut new_contents, translated))
+                .is_err()
+                {
+                    eprintln!("{}: Failed to process chapter name.", PREPROCESSOR_NAME);
+                } else {
+                    chapter.name = new_contents;
+                }
             }
             mdbook::BookItem::Separator => {}
-            mdbook::BookItem::PartTitle(_) => {}
+            mdbook::BookItem::PartTitle(title) => {
+                let title_events = Parser::new(title);
+                let mut new_contents = String::new();
+                if translate(
+                    title_events,
+                    input_events.iter().cloned(),
+                    &lang,
+                    Some(&default_lang),
+                )
+                .map(|translated| push_markdown(&mut new_contents, translated))
+                .is_err()
+                {
+                    eprintln!("{}: Failed to process chapter.", PREPROCESSOR_NAME);
+                } else {
+                    *title = new_contents;
+                }
+            }
         });
 
         Ok(book)
