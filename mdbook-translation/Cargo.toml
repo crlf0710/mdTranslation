@@ -1,6 +1,6 @@
 [package]
 name = "mdbook-translation"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Charles Lew <crlf0710@gmail.com>"]
 license = "MIT OR Apache-2.0"
 edition = "2018"
@@ -10,7 +10,7 @@ categories = ["text-processing", "localization"]
 repository = "https://github.com/crlf0710/mdTranslation"
 
 [dependencies]
-mdtranslation = { version = "0.1.0", path = ".." }
+mdtranslation = { version = "0.1.2", path = ".." }
 mdbook = { version = "0.4", default-features = false }
 clap = "2.33.3"
 serde_json = "1.0.64"
