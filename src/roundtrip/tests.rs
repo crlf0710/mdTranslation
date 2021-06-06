@@ -2,50 +2,17 @@ use super::write_markdown;
 use crate::utils::InlineGroupIteratorExt;
 use pulldown_cmark::{CodeBlockKind, Event, Options, Parser, Tag};
 
-const COMMONMARK_SPEC_TEXT: &'static str = include_str!("./third_party/CommonMark/spec.txt");
-
-const COMMONMARK_SPEC_EXAMPLE_COUNT: usize = 649;
-
-fn is_example_fence(tag: &Tag<'_>) -> bool {
-    if let Tag::CodeBlock(CodeBlockKind::Fenced(fence_value)) = tag {
-        &**fence_value == "example"
-    } else {
-        false
+fn test_roundtrip_literal(original: &str, expected: &str) -> bool {
+    let opts = Options::empty();
+    let event_list = Parser::new_ext(original, opts).collect::<Vec<_>>();
+    let mut regen_str = Vec::new();
+    write_markdown(&mut regen_str, event_list.iter().cloned()).expect("Regeneration failure");
+    let regen_str = core::str::from_utf8(&regen_str).expect("Should be utf-8");
+    if regen_str == expected {
+        return true;
     }
-}
-
-fn collect_test_case<'a>(events: &mut impl Iterator<Item = Event<'a>>) -> Option<(String, String)> {
-    let begin_tag = events.next().and_then(|e| {
-        if let Event::Start(tag) = e {
-            Some(tag)
-        } else {
-            None
-        }
-    })?;
-    let text = events.next().and_then(|e| {
-        if let Event::Text(text) = e {
-            Some(text)
-        } else {
-            None
-        }
-    })?;
-    let end_tag = events.next().and_then(|e| {
-        if let Event::End(tag) = e {
-            Some(tag)
-        } else {
-            None
-        }
-    })?;
-    if !(is_example_fence(&begin_tag) && is_example_fence(&end_tag)) {
-        return None;
-    }
-    let splitted_text = text.split("\n.\n").collect::<Vec<_>>();
-    if splitted_text.len() != 2 {
-        return None;
-    }
-    let input = splitted_text[0];
-    let output = splitted_text[1].trim_end_matches('\n');
-    Some((input.to_string(), output.to_string()))
+    eprintln!("Test fail: content is {:?} vs {:?}", regen_str, expected);
+    return false;
 }
 
 fn test_roundtrip(original: &str, expected: &str) -> bool {
@@ -116,6 +83,54 @@ fn test_roundtrip(original: &str, expected: &str) -> bool {
 
 #[test]
 fn commonmark_spec_roundtrip() {
+    const COMMONMARK_SPEC_TEXT: &'static str = include_str!("./third_party/CommonMark/spec.txt");
+
+    const COMMONMARK_SPEC_EXAMPLE_COUNT: usize = 649;
+
+    fn is_example_fence(tag: &Tag<'_>) -> bool {
+        if let Tag::CodeBlock(CodeBlockKind::Fenced(fence_value)) = tag {
+            &**fence_value == "example"
+        } else {
+            false
+        }
+    }
+
+    fn collect_test_case<'a>(
+        events: &mut impl Iterator<Item = Event<'a>>,
+    ) -> Option<(String, String)> {
+        let begin_tag = events.next().and_then(|e| {
+            if let Event::Start(tag) = e {
+                Some(tag)
+            } else {
+                None
+            }
+        })?;
+        let text = events.next().and_then(|e| {
+            if let Event::Text(text) = e {
+                Some(text)
+            } else {
+                None
+            }
+        })?;
+        let end_tag = events.next().and_then(|e| {
+            if let Event::End(tag) = e {
+                Some(tag)
+            } else {
+                None
+            }
+        })?;
+        if !(is_example_fence(&begin_tag) && is_example_fence(&end_tag)) {
+            return None;
+        }
+        let splitted_text = text.split("\n.\n").collect::<Vec<_>>();
+        if splitted_text.len() != 2 {
+            return None;
+        }
+        let input = splitted_text[0];
+        let output = splitted_text[1].trim_end_matches('\n');
+        Some((input.to_string(), output.to_string()))
+    }
+
     let opts = Options::empty();
     let p = Parser::new_ext(COMMONMARK_SPEC_TEXT, opts);
 
@@ -142,4 +157,11 @@ fn commonmark_spec_roundtrip() {
     }
     assert_eq!(COMMONMARK_SPEC_EXAMPLE_COUNT, testsuite_len);
     assert_eq!(COMMONMARK_SPEC_EXAMPLE_COUNT, success_count);
+}
+
+#[test]
+fn suppress_unnecessary_escaping_1() {
+    for text in (&["en_US, no escaping", "Hello."]).iter().copied() {
+        assert_eq!(true, test_roundtrip_literal(text, text));
+    }
 }

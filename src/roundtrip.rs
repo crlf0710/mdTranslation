@@ -1,10 +1,11 @@
 use crate::utils::{InlineGroupEvent, InlineGroupIteratorExt};
 use crate::utils::{NestedInlineGroupEvent, NestedInlineGroupIteratorExt};
 use pulldown_cmark::escape::{StrWrite, WriteWrapper};
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{self, Write};
 use std::mem;
 use std::rc::Rc;
-use std::{cell::Cell, collections::VecDeque};
 
 pub(crate) const SPECIAL_SEPARATOR_WITH_EOL: &'static str = "<!-- ** ROUNDTRIP SEPARATOR ** -->\n";
 
@@ -115,11 +116,14 @@ where
                 }
                 [InlineOrBlockTraverseGroup::InlineGroup(inlines), tail @ ..] => {
                     let mut inline_group_ctx = InlineGroupCtx::new();
+                    let escaping_info = Rc::new(RefCell::new(EscapingInfo::default()));
                     let nested_inline_groups = inlines
                         .iter()
                         .cloned()
                         .into_nested_inline_groups()
-                        .map(|group| annotate_inline_group(&mut inline_group_ctx, group))
+                        .map(|group| {
+                            annotate_inline_group(&mut inline_group_ctx, group, &escaping_info)
+                        })
                         .collect::<Vec<_>>();
                     process_inlines_group(&mut self.writer, &context, &nested_inline_groups)?;
                     remaining_groups = tail;
@@ -1247,18 +1251,24 @@ enum AnnotatedInlineTag<'event> {
         uri: pulldown_cmark::CowStr<'event>,
         title: pulldown_cmark::CowStr<'event>,
         ref_name: pulldown_cmark::CowStr<'event>,
+        escaping_info: Rc<RefCell<EscapingInfo>>,
     },
     Image {
         kind: pulldown_cmark::LinkType,
         uri: pulldown_cmark::CowStr<'event>,
         title: pulldown_cmark::CowStr<'event>,
         ref_name: pulldown_cmark::CowStr<'event>,
+        escaping_info: Rc<RefCell<EscapingInfo>>,
     },
     Other(pulldown_cmark::Tag<'event>),
 }
 
 impl<'event> AnnotatedInlineTag<'event> {
-    fn from(ctx: &mut InlineGroupCtx, tag: pulldown_cmark::Tag<'event>) -> Self {
+    fn from(
+        ctx: &mut InlineGroupCtx,
+        tag: pulldown_cmark::Tag<'event>,
+        escaping_info: &Rc<RefCell<EscapingInfo>>,
+    ) -> Self {
         use pulldown_cmark::LinkType;
         use pulldown_cmark::Tag;
         match tag {
@@ -1279,6 +1289,7 @@ impl<'event> AnnotatedInlineTag<'event> {
                     uri,
                     title,
                     ref_name,
+                    escaping_info: escaping_info.clone(),
                 }
             }
             Tag::Image(kind, uri, title) => {
@@ -1292,6 +1303,7 @@ impl<'event> AnnotatedInlineTag<'event> {
                     uri,
                     title,
                     ref_name,
+                    escaping_info: escaping_info.clone(),
                 }
             }
             _ => AnnotatedInlineTag::Other(tag),
@@ -1301,24 +1313,32 @@ impl<'event> AnnotatedInlineTag<'event> {
 
 #[derive(Clone, Debug)]
 enum AnnotatedNestedInlineEvent<'event> {
-    Event(pulldown_cmark::Event<'event>),
+    Event(pulldown_cmark::Event<'event>, Rc<RefCell<EscapingInfo>>),
     Group(
         AnnotatedInlineTag<'event>,
         Vec<AnnotatedNestedInlineEvent<'event>>,
     ),
 }
 
+#[derive(Debug, Default)]
+struct EscapingInfo {
+    punctuations_no_escaping: std::collections::BTreeSet<char>,
+}
+
 fn annotate_inline_group<'event>(
     ctx: &mut InlineGroupCtx,
     event: NestedInlineGroupEvent<'event>,
+    escaping_info: &Rc<RefCell<EscapingInfo>>,
 ) -> AnnotatedNestedInlineEvent<'event> {
     match event {
-        NestedInlineGroupEvent::Inline(e) => AnnotatedNestedInlineEvent::Event(e),
+        NestedInlineGroupEvent::Inline(e) => {
+            AnnotatedNestedInlineEvent::Event(e, escaping_info.clone())
+        }
         NestedInlineGroupEvent::Group(t, inlines) => {
-            let t = AnnotatedInlineTag::from(ctx, t);
+            let t = AnnotatedInlineTag::from(ctx, t, escaping_info);
             let inlines = inlines
                 .into_iter()
-                .map(|x| annotate_inline_group(ctx, x))
+                .map(|x| annotate_inline_group(ctx, x, escaping_info))
                 .collect();
             AnnotatedNestedInlineEvent::Group(t, inlines)
         }
@@ -1330,6 +1350,133 @@ fn process_inlines_group<'event>(
     context: &[AnnotatedBlockTag<'event>],
     inlines: &Vec<AnnotatedNestedInlineEvent<'event>>,
 ) -> io::Result<()> {
+    analysis_inline_contents_escaping(context, inlines);
+    analysis_inline_contents_styles(context, inlines);
+    output_inline_contents(writer, &[context], &inlines[..])?;
+    output_hoisted_references(writer, &[context], &inlines[..])?;
+
+    Ok(())
+}
+
+fn analysis_inline_contents_escaping<'event>(
+    _context: &[AnnotatedBlockTag<'event>],
+    inlines: &Vec<AnnotatedNestedInlineEvent<'event>>,
+) {
+    let mut escaping_info = None;
+    let mut chars = vec![];
+
+    fn collect_inline_contents_chars<'event>(
+        inlines: &Vec<AnnotatedNestedInlineEvent<'event>>,
+        chars: &mut Vec<char>,
+        escaping_info_result: &mut Option<Rc<RefCell<EscapingInfo>>>,
+    ) {
+        for inline in inlines {
+            match inline {
+                AnnotatedNestedInlineEvent::Event(e, escaping_info) => {
+                    use pulldown_cmark::Event;
+                    if escaping_info_result.is_none() {
+                        *escaping_info_result = Some(escaping_info.clone());
+                    }
+                    match e {
+                        Event::Text(s) => {
+                            chars.extend(s.chars());
+                        }
+                        Event::SoftBreak => {
+                            chars.push('\n');
+                        }
+                        Event::HardBreak => {
+                            chars.push('\n');
+                        }
+                        _ => {}
+                    }
+                }
+                AnnotatedNestedInlineEvent::Group(g, inlines) => {
+                    match g {
+                        AnnotatedInlineTag::Link {
+                            title,
+                            escaping_info,
+                            ..
+                        }
+                        | AnnotatedInlineTag::Image {
+                            title,
+                            escaping_info,
+                            ..
+                        } => {
+                            chars.extend("![".chars());
+                            chars.extend(title.chars());
+                            chars.extend("]".chars());
+                            if escaping_info_result.is_none() {
+                                *escaping_info_result = Some(escaping_info.clone());
+                            }
+                        }
+                        AnnotatedInlineTag::Emphasis{..} | AnnotatedInlineTag::Strong {..} => {
+                            // we simply add a few usages of each to indicate that these should be escaped.
+                            chars.extend("*__*".chars());
+                        }
+                        _ => {}
+                    }
+                    collect_inline_contents_chars(inlines, chars, escaping_info_result);
+                }
+            }
+        }
+    }
+
+    collect_inline_contents_chars(inlines, &mut chars, &mut escaping_info);
+
+    let mut escaping_info = match &escaping_info {
+        None => return,
+        Some(info) => info.borrow_mut(),
+    };
+
+    let mut punctuation_usage: BTreeMap<char, (core::ops::RangeInclusive<usize>, usize)> =
+        BTreeMap::new();
+    for (idx, ch) in chars.iter().copied().enumerate() {
+        if !ch.is_ascii_punctuation() && !ch.is_ascii_control() {
+            continue;
+        }
+        punctuation_usage
+            .entry(ch)
+            .and_modify(|(prev_range, prev_count)| {
+                *prev_range = *prev_range.start()..=idx;
+                *prev_count += 1;
+            })
+            .or_insert_with(|| (idx..=idx, 1));
+    }
+
+    escaping_info.punctuations_no_escaping.insert(',');
+    escaping_info.punctuations_no_escaping.insert('?');
+
+    if punctuation_usage.get(&'[').is_none() {
+        escaping_info.punctuations_no_escaping.insert('!');
+    }
+
+    if punctuation_usage
+        .get(&'_')
+        .map(|(_, count)| *count)
+        .unwrap_or(0)
+        < 2
+    {
+        escaping_info.punctuations_no_escaping.insert('_');
+    }
+
+    if punctuation_usage.get(&'\n').is_none() {
+        // When there's \n in text, it is no longer easy to check whether there's risk of recognizing as list on each line.
+        if let Some((range, _)) = punctuation_usage.get(&'.') {
+            let start = *range.start();
+            if !chars[0..start].iter().copied().all(|ch| ch.is_ascii_punctuation() || ch.is_ascii_digit()) {
+                // not list-numbering like usages.
+                escaping_info.punctuations_no_escaping.insert('.');
+            }
+        } else {
+            escaping_info.punctuations_no_escaping.insert('.');
+        }
+    }
+}
+
+fn analysis_inline_contents_styles<'event>(
+    context: &[AnnotatedBlockTag<'event>],
+    inlines: &Vec<AnnotatedNestedInlineEvent<'event>>,
+) {
     if let Ok(()) = resolve_strong_emphasis_styles(
         context,
         &inlines[..],
@@ -1342,10 +1489,6 @@ fn process_inlines_group<'event>(
             inlines
         );
     }
-    output_inline_contents(writer, &[context], &inlines[..])?;
-    output_hoisted_references(writer, &[context], &inlines[..])?;
-
-    Ok(())
 }
 
 #[derive(PartialEq, Debug)]
@@ -1371,7 +1514,7 @@ fn get_neighboring_character<'event>(
     use pulldown_cmark::Event;
     let inline = inline?;
     match inline {
-        AnnotatedNestedInlineEvent::Event(e) => match e {
+        AnnotatedNestedInlineEvent::Event(e, _) => match e {
             Event::Text(s) | Event::Html(s) => {
                 let ch = if start_side {
                     s.chars().nth(0)
@@ -1396,7 +1539,7 @@ fn resolve_strong_emphasis_styles<'event>(
     let inline_len = inlines.len();
     for (idx, inline) in inlines.iter().enumerate() {
         match inline {
-            AnnotatedNestedInlineEvent::Event(_) => continue,
+            AnnotatedNestedInlineEvent::Event(_, _) => continue,
             AnnotatedNestedInlineEvent::Group(tag, inner_inlines) => {
                 let (is_emphasis, target_style);
                 match tag {
@@ -1551,7 +1694,7 @@ fn output_hoisted_references<'event>(
     use pulldown_cmark::LinkType;
     for inline in inlines {
         match inline {
-            AnnotatedNestedInlineEvent::Event(_) => {
+            AnnotatedNestedInlineEvent::Event(_, _) => {
                 // do nothing
             }
             AnnotatedNestedInlineEvent::Group(t, inlines) => match t {
@@ -1566,12 +1709,14 @@ fn output_hoisted_references<'event>(
                     uri,
                     title,
                     ref_name,
+                    escaping_info,
                 }
                 | AnnotatedInlineTag::Image {
                     kind,
                     uri,
                     title,
                     ref_name,
+                    escaping_info,
                 } => match kind {
                     LinkType::Collapsed | LinkType::Shortcut | LinkType::Reference => {
                         writer.write_str("\n")?;
@@ -1588,7 +1733,7 @@ fn output_hoisted_references<'event>(
                         writer.write_str(&*escape_url(uri))?;
                         if !title.is_empty() {
                             writer.write_str(" \"")?;
-                            writer.write_str(&*escape_text(&title))?;
+                            writer.write_str(&*escape_text(&title, &escaping_info.borrow()))?;
                             writer.write_str("\"")?;
                         }
                         output_hoisted_references(writer, context, inlines)?;
@@ -1618,12 +1763,12 @@ fn output_inline_contents<'event>(
         .next();
     for inline in inlines {
         match inline {
-            AnnotatedNestedInlineEvent::Event(e) => match e {
+            AnnotatedNestedInlineEvent::Event(e, escaping_info) => match e {
                 Event::Text(s) => {
                     let need_escape =
                         !matches!(containing_tag, Some(AnnotatedBlockTag::CodeBlock { .. }));
                     if need_escape {
-                        let escaped = escape_text(s);
+                        let escaped = escape_text(s, &escaping_info.borrow());
                         writer.write_str(&escaped)?;
                     } else {
                         writer.write_str(s)?;
@@ -1692,6 +1837,7 @@ fn output_inline_contents<'event>(
                     uri,
                     title,
                     ref_name,
+                    escaping_info,
                 } => {
                     use pulldown_cmark::LinkType;
                     match kind {
@@ -1699,7 +1845,7 @@ fn output_inline_contents<'event>(
                             writer.write_str("<")?;
                             for inline in inlines {
                                 match inline {
-                                    AnnotatedNestedInlineEvent::Event(Event::Text(s)) => {
+                                    AnnotatedNestedInlineEvent::Event(Event::Text(s), _) => {
                                         writer.write_str(s)?;
                                     }
                                     _ => {
@@ -1733,7 +1879,7 @@ fn output_inline_contents<'event>(
                             writer.write_str(&*escape_url(uri))?;
                             if !title.is_empty() {
                                 writer.write_str(" \"")?;
-                                writer.write_str(&*escape_text(&title))?;
+                                writer.write_str(&*escape_text(&title, &escaping_info.borrow()))?;
                                 writer.write_str("\"")?;
                             }
                             writer.write_str(")")?;
@@ -1748,6 +1894,7 @@ fn output_inline_contents<'event>(
                     uri,
                     title,
                     ref_name,
+                    escaping_info,
                 } => {
                     use pulldown_cmark::LinkType;
                     match kind {
@@ -1775,7 +1922,7 @@ fn output_inline_contents<'event>(
                             writer.write_str(&*escape_url(uri))?;
                             if !title.is_empty() {
                                 writer.write_str(" \"")?;
-                                writer.write_str(&*escape_text(&title))?;
+                                writer.write_str(&*escape_text(&title, &escaping_info.borrow()))?;
                                 writer.write_str("\"")?;
                             }
                             writer.write_str(")")?;
@@ -1794,11 +1941,14 @@ fn output_inline_contents<'event>(
     Ok(())
 }
 
-fn escape_text<'event>(input: &pulldown_cmark::CowStr<'event>) -> pulldown_cmark::CowStr<'event> {
+fn escape_text<'event>(
+    input: &pulldown_cmark::CowStr<'event>,
+    escaping_info: &EscapingInfo,
+) -> pulldown_cmark::CowStr<'event> {
     let mut rewrite_str = None;
     let input_str = &*input;
     for (offset, ch) in input_str.char_indices() {
-        if ch.is_ascii_punctuation() {
+        if ch.is_ascii_punctuation() && !escaping_info.punctuations_no_escaping.contains(&ch) {
             let rewrite_str = rewrite_str.get_or_insert_with(|| input_str[..offset].to_string());
             rewrite_str.push('\\');
             rewrite_str.push(ch);
