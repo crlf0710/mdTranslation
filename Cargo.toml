@@ -1,6 +1,6 @@
 [package]
 name = "mdtranslation"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["CrLF0710 <crlf0710@gmail.com>"]
 description = "A utility to prepare multi-lingual Markdown documents"
 license = "MIT OR Apache-2.0"
