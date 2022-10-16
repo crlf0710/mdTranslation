@@ -4,6 +4,7 @@ use mdbook::preprocess::{Preprocessor, PreprocessorContext};
 use mdtranslation::pulldown_cmark::{self, Parser};
 use mdtranslation::roundtrip::push_markdown;
 use mdtranslation::translation::{translate_ext, TranslationOptions};
+use walkdir::WalkDir;
 
 const PREPROCESSOR_NAME: &str = "mdbook-translation";
 
@@ -41,7 +42,20 @@ impl Preprocessor for TranslationPreprocessor {
             return Ok(book);
         };
 
-        let input_data = match std::fs::read_to_string(&input_path) {
+        let input_data = match if input_path.is_dir() {
+            let files = WalkDir::new("foo")
+                .follow_links(true)
+                .into_iter()
+                .map(|entry| std::fs::read_to_string(entry?.path()))
+                .collect::<Result<Vec<String>, std::io::Error>>();
+
+            match files {
+                Ok(files) => Ok(files.join("\n")),
+                Err(e) => Err(e),
+            }
+        } else {
+            std::fs::read_to_string(&input_path)
+        } {
             Ok(data) => data,
             Err(e) => {
                 eprintln!(
