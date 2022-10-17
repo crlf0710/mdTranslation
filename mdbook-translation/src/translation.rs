@@ -4,6 +4,7 @@ use mdbook::preprocess::{Preprocessor, PreprocessorContext};
 use mdtranslation::pulldown_cmark::{self, Parser};
 use mdtranslation::roundtrip::push_markdown;
 use mdtranslation::translation::{translate_ext, TranslationOptions};
+use walkdir::WalkDir;
 
 const PREPROCESSOR_NAME: &str = "mdbook-translation";
 
@@ -41,15 +42,53 @@ impl Preprocessor for TranslationPreprocessor {
             return Ok(book);
         };
 
-        let input_data = match std::fs::read_to_string(&input_path) {
-            Ok(data) => data,
+        enum WalkdirOrIoError {
+            Walkdir(walkdir::Error),
+            Io(std::io::Error),
+        }
+
+        let input_data = match WalkDir::new(&input_path)
+            .follow_links(true)
+            .into_iter()
+            .map(|entry| match entry {
+                Ok(entry) => {
+                    let path = entry.path();
+                    if !path.is_file() {
+                        return Ok(String::new());
+                    }
+
+                    let read = std::fs::read_to_string(path);
+                    match read {
+                        Ok(data) => Ok(data),
+                        Err(e) => {
+                            eprintln!(
+                                "{}: failed to open `{}`.",
+                                PREPROCESSOR_NAME,
+                                path.display()
+                            );
+
+                            Err(WalkdirOrIoError::Io(e))
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "{}: failed to stat `{}`.",
+                        PREPROCESSOR_NAME,
+                        input_path.display()
+                    );
+
+                    Err(WalkdirOrIoError::Walkdir(e))
+                }
+            })
+            .collect::<Result<Vec<String>, WalkdirOrIoError>>()
+        {
+            Ok(data) => data.join("\n\n"),
             Err(e) => {
-                eprintln!(
-                    "{}: failed to open `{}`.",
-                    PREPROCESSOR_NAME,
-                    input_path.display()
-                );
-                return Err(e.into());
+                return Err(match e {
+                    WalkdirOrIoError::Walkdir(e) => e.into(),
+                    WalkdirOrIoError::Io(e) => e.into(),
+                })
             }
         };
         let input_events = Parser::new(&input_data).collect::<Vec<_>>();
