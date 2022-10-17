@@ -83,7 +83,7 @@ impl Preprocessor for TranslationPreprocessor {
             })
             .collect::<Result<Vec<String>, WalkdirOrIoError>>()
         {
-            Ok(data) => data.join("\n"),
+            Ok(data) => data.join("\n\n"),
             Err(e) => {
                 return Err(match e {
                     WalkdirOrIoError::Walkdir(e) => e.into(),
